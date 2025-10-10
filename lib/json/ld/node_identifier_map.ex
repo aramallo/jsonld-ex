@@ -1,18 +1,29 @@
 defmodule JSON.LD.NodeIdentifierMap do
-  @moduledoc nil
+  @moduledoc false
 
-  use GenServer
+  @type t() :: %__MODULE__{}
+
+  defstruct tab: nil
 
   # Client API
 
-  @spec start_link(keyword) :: GenServer.on_start()
-  def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, :ok, opts)
+  @doc """
+  Creates a Blank Node identifier map using an anonymous `ets` table.
+  """
+  @spec new() :: :ets.tid()
+
+  def new() do
+    struct!(__MODULE__, tab: :ets.new(:undefined, [:set, {:keypos, 1}]))
   end
 
-  @spec stop(GenServer.server(), atom, timeout) :: :ok
-  def stop(pid, reason \\ :normal, timeout \\ :infinity) do
-    :ok = GenServer.stop(pid, reason, timeout)
+  @doc """
+  Deletes the blank node identifier map (deleting the underlying `ets` table)
+  """
+  @spec delete(t()) :: :ok
+
+  def delete(%__MODULE__{tab: tab}) do
+    _ = :ets.delete(tab)
+    :ok
   end
 
   @doc """
@@ -20,28 +31,25 @@ defmodule JSON.LD.NodeIdentifierMap do
 
   Details at <https://www.w3.org/TR/json-ld-api/#generate-blank-node-identifier>
   """
-  @spec generate_blank_node_id(GenServer.server(), String.t() | nil) :: String.t()
-  def generate_blank_node_id(pid, identifier \\ nil) do
-    GenServer.call(pid, {:generate_id, identifier})
+  @spec generate_blank_node_id(t(), String.t() | nil) :: String.t()
+
+  def generate_blank_node_id(map, identifier \\ nil)
+
+  def generate_blank_node_id(%__MODULE__{}, nil) do
+    blank_node_id()
   end
 
-  # Server Callbacks
+  def generate_blank_node_id(%__MODULE__{tab: tab}, identifier) do
+    case :ets.lookup(tab, identifier) do
+      [] ->
+        blank_node_id = blank_node_id()
+        :ets.insert(tab, {identifier, blank_node_id})
+        blank_node_id
 
-  @spec init(:ok) :: {:ok, map}
-  def init(:ok) do
-    {:ok, %{map: %{}, counter: 0}}
-  end
-
-  @spec handle_call({:generate_id, String.t() | nil}, GenServer.from(), map) ::
-          {:reply, String.t(), map}
-  def handle_call({:generate_id, identifier}, _, %{map: map, counter: counter} = state) do
-    if identifier && map[identifier] do
-      {:reply, map[identifier], state}
-    else
-      blank_node_id = "_:b#{counter}"
-      map = if identifier, do: Map.put(map, identifier, blank_node_id), else: map
-
-      {:reply, blank_node_id, %{counter: counter + 1, map: map}}
+      [{^identifier, blank_node_id}] ->
+        blank_node_id
     end
   end
+
+  defp blank_node_id(), do: "_:b#{System.unique_integer([:monotonic, :positive])}"
 end

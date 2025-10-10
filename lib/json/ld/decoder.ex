@@ -27,7 +27,7 @@ defmodule JSON.LD.Decoder do
 
   @spec to_rdf(JSON.LD.input(), Options.t() | Enum.t()) :: Dataset.t() | Graph.t()
   def to_rdf(input, options \\ %Options{}) do
-    {:ok, node_id_map} = NodeIdentifierMap.start_link()
+    node_id_map = NodeIdentifierMap.new()
 
     options = Options.new(options)
 
@@ -37,7 +37,7 @@ defmodule JSON.LD.Decoder do
       |> JSON.LD.node_map(node_id_map)
       |> do_to_rdf(node_id_map, options)
     after
-      NodeIdentifierMap.stop(node_id_map)
+      NodeIdentifierMap.delete(node_id_map)
     end
   end
 

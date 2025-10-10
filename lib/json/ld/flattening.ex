@@ -57,12 +57,12 @@ defmodule JSON.LD.Flattening do
   def node_map(input, node_id_map \\ nil)
 
   def node_map(input, nil) do
-    {:ok, node_id_map} = NodeIdentifierMap.start_link()
+    node_id_map = NodeIdentifierMap.new()
 
     try do
       node_map(input, node_id_map)
     after
-      NodeIdentifierMap.stop(node_id_map)
+      NodeIdentifierMap.delete(node_id_map)
     end
   end
 
