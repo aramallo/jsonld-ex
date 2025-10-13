@@ -825,7 +825,7 @@ defmodule JSON.LD.Framing do
       # Check if already embedded
       embedded_node = Map.get(state.embedded, id)
 
-      if System.get_env("DEBUG_FRAMING") != nil and String.contains?(to_string(id), "column_of") do
+      if System.get_env("DEBUG_FRAMING") != nil and (String.contains?(to_string(id), "column_of") or String.contains?(to_string(id), "BoardColumn")) do
         IO.puts("\n>>> EMBED_NODE called for #{id}")
         IO.puts("    embed_value: #{embed_value}")
         IO.puts("    is_top_level_match: #{is_top_level_match}")
@@ -833,15 +833,23 @@ defmodule JSON.LD.Framing do
         IO.puts("    already_embedded: #{not is_nil(embedded_node)}")
         IO.puts("    parent: #{inspect(parent)}")
         IO.puts("    frame @embed: #{inspect(frame["@embed"])}")
+        IO.puts("    frame @explicit: #{inspect(frame["@explicit"])}")
+        IO.puts("    frame keys: #{inspect(Map.keys(frame) |> Enum.take(15))}")
+        if Map.has_key?(frame, "http://www.w3.org/2000/01/rdf-schema#domain") do
+          IO.puts("    frame HAS domain key!")
+          IO.puts("    frame[domain]: #{inspect(frame["http://www.w3.org/2000/01/rdf-schema#domain"], limit: 5)}")
+        else
+          IO.puts("    frame does NOT have domain key")
+        end
         IO.puts("    subject_stack: #{inspect(state.subject_stack)}")
       end
 
       cond do
-        # Circular reference detected - BUT if already embedded and @embed: @always, return full node
+        # Circular reference detected - BUT if already embedded and @embed: @always, return the full embedded node
         # When a node is already fully embedded, it's safe to return it even if circular
-        # This allows @embed: @always to work correctly with reverse properties
-        is_circular and embedded_node != nil and embed_value == :always ->
-          if System.get_env("DEBUG_FRAMING") != nil and String.contains?(to_string(id), "column_of") do
+        # This allows @embed: @always to work correctly with nested properties
+        is_circular and embedded_node != nil and is_map(embedded_node) and embed_value == :always ->
+          if System.get_env("DEBUG_FRAMING") != nil and (String.contains?(to_string(id), "column_of") or String.contains?(to_string(id), "BoardColumn")) do
             IO.puts("    -> Returning already-embedded node (circular but @always)")
           end
           {embedded_node, state}
@@ -849,7 +857,7 @@ defmodule JSON.LD.Framing do
         # Circular reference detected - return just a reference
         # Normative: Circular references must be broken to avoid infinite embedding
         is_circular ->
-          if System.get_env("DEBUG_FRAMING") != nil and String.contains?(to_string(id), "column_of") do
+          if System.get_env("DEBUG_FRAMING") != nil and (String.contains?(to_string(id), "column_of") or String.contains?(to_string(id), "BoardColumn")) do
             IO.puts("    -> Returning reference (circular)")
           end
           {%{@id => id}, state}
@@ -857,7 +865,7 @@ defmodule JSON.LD.Framing do
         # Never embed - return node reference (only for referenced nodes, not top-level matches)
         # Normative: @embed: @never behavior
         embed_value == :never and not is_top_level_match ->
-          if System.get_env("DEBUG_FRAMING") != nil and String.contains?(to_string(id), "column_of") do
+          if System.get_env("DEBUG_FRAMING") != nil and (String.contains?(to_string(id), "column_of") or String.contains?(to_string(id), "BoardColumn")) do
             IO.puts("    -> Returning reference (@never)")
           end
           {%{@id => id}, state}
@@ -866,7 +874,7 @@ defmodule JSON.LD.Framing do
         # Normative: @embed: @once behavior (default)
         # Top-level matches should always be fully embedded regardless of prior embedding
         embedded_node != nil and embed_value == :once and not is_top_level_match ->
-          if System.get_env("DEBUG_FRAMING") != nil and String.contains?(to_string(id), "column_of") do
+          if System.get_env("DEBUG_FRAMING") != nil and (String.contains?(to_string(id), "column_of") or String.contains?(to_string(id), "BoardColumn")) do
             IO.puts("    -> Returning reference (already embedded with @once)")
           end
           {%{@id => id}, state}
@@ -874,7 +882,7 @@ defmodule JSON.LD.Framing do
         # @last: replace previous embedding (not fully implemented - requires backtracking)
         # For now, treat as @once for memory efficiency (but NOT for top-level matches)
         embedded_node != nil and embed_value == :last and not is_top_level_match ->
-          if System.get_env("DEBUG_FRAMING") != nil and String.contains?(to_string(id), "column_of") do
+          if System.get_env("DEBUG_FRAMING") != nil and (String.contains?(to_string(id), "column_of") or String.contains?(to_string(id), "BoardColumn")) do
             IO.puts("    -> Returning reference (@last)")
           end
           {%{@id => id}, state}
@@ -882,16 +890,17 @@ defmodule JSON.LD.Framing do
         # Embed the node
         # Normative: @embed: @always or first embedding with @once or top-level match
         true ->
-          if System.get_env("DEBUG_FRAMING") != nil and String.contains?(to_string(id), "column_of") do
+          if System.get_env("DEBUG_FRAMING") != nil and (String.contains?(to_string(id), "column_of") or String.contains?(to_string(id), "BoardColumn")) do
             IO.puts("    -> Fully embedding node")
           end
-          # Mark as embedded (lightweight - just store true)
-          state = put_in(state.embedded[id], true)
           # Add to subject stack for circular reference detection
           state = %{state | subject_stack: [id | state.subject_stack]}
           {output, final_state} = create_output_node(state, node, frame, id)
 
-          if System.get_env("DEBUG_FRAMING") != nil and String.contains?(to_string(id), "column_of") do
+          # Store the actual embedded node for potential reuse when embed_value is :always
+          final_state = put_in(final_state.embedded[id], output)
+
+          if System.get_env("DEBUG_FRAMING") != nil and (String.contains?(to_string(id), "column_of") or String.contains?(to_string(id), "BoardColumn")) do
             IO.puts("    -> create_output_node returned keys: #{inspect(Map.keys(output))}")
           end
 
@@ -1088,11 +1097,13 @@ defmodule JSON.LD.Framing do
           end
 
         if System.get_env("DEBUG_FRAMING") != nil and property == "http://www.w3.org/2000/01/rdf-schema#domain" and node["@id"] == "wellos:column_of" do
-          IO.puts("\n=== PROCESSING DOMAIN PROPERTY ===")
+          IO.puts("\n=== PROCESSING DOMAIN PROPERTY IN column_of ===")
           IO.puts("Parent: #{parent_id}")
           IO.puts("Node: #{node["@id"]}")
           IO.puts("Property: #{property}")
+          IO.puts("Frame keys: #{inspect(Map.keys(frame))}")
           IO.puts("Frame has property: #{Map.has_key?(frame, property)}")
+          IO.puts("Frame[property] raw: #{inspect(Map.get(frame, property), limit: 5)}")
           IO.puts("Property frame keys: #{inspect(Map.keys(property_frame))}")
           IO.puts("Property frame: #{inspect(property_frame, limit: 5)}")
           IO.puts("Property frame is wildcard: #{is_map(property_frame) and map_size(property_frame) == 0}")
@@ -1571,6 +1582,12 @@ defmodule JSON.LD.Framing do
                   IO.puts("Property frame keys: #{inspect(Map.keys(property_frame) |> Enum.take(10))}")
                   IO.puts("Property frame @embed: #{inspect(property_frame["@embed"])}")
                   IO.puts("Property frame @explicit: #{inspect(property_frame["@explicit"])}")
+
+                  # Check domain frame specifically
+                  domain_frame = property_frame["http://www.w3.org/2000/01/rdf-schema#domain"]
+                  if domain_frame do
+                    IO.puts("Property frame has domain: #{inspect(domain_frame, limit: 5)}")
+                  end
                 end
 
                 {referencing_nodes, new_state} =
@@ -1588,17 +1605,20 @@ defmodule JSON.LD.Framing do
                     if System.get_env("DEBUG_FRAMING") do
                       case result do
                         {nil, _} -> IO.puts("      Result: nil")
-                        {embedded, _} ->
+                        {embedded, _} when is_map(embedded) ->
                           IO.puts("      Result keys: #{inspect(Map.keys(embedded))}")
                           if map_size(embedded) <= 2 do
                             IO.puts("      MINIMAL EMBEDDING! Full result: #{inspect(embedded)}")
                           end
+                        {embedded, _} ->
+                          IO.puts("      Result is NOT a map: #{inspect(embedded)}")
                       end
                     end
 
                     case result do
                       {nil, updated_state} -> {[], updated_state}
-                      {embedded, updated_state} -> {[embedded], updated_state}
+                      {embedded, updated_state} when is_map(embedded) -> {[embedded], updated_state}
+                      {_, updated_state} -> {[], updated_state}  # Skip non-map results
                     end
                   end)
                   |> then(fn {nested_nodes, final_thread_state} ->
@@ -1814,11 +1834,13 @@ defmodule JSON.LD.Framing do
   # Get a frame flag value with fallback to state default
   # Normative: Frame flag extraction
   defp get_frame_flag(frame, flag, default) do
-    case Map.get(frame, flag) do
+    result = case Map.get(frame, flag) do
       [value | _] -> normalize_flag_value(flag, value, default)
       value when not is_nil(value) -> normalize_flag_value(flag, value, default)
       nil -> default
     end
+
+    result
   end
 
   # Normalize flag values to atoms (for @embed) or booleans (for @explicit, @omitDefault, @requireAll)
@@ -1831,16 +1853,16 @@ defmodule JSON.LD.Framing do
   end
 
   # @embed flag with keyword values
-  defp normalize_flag_value(@embed, value, _default) when value in [true, @always, "always"],
+  defp normalize_flag_value(@embed, value, _default) when value in [true, @always, "always", :always],
     do: :always
 
-  defp normalize_flag_value(@embed, value, _default) when value in [false, @never, "never"],
+  defp normalize_flag_value(@embed, value, _default) when value in [false, @never, "never", :never],
     do: :never
 
-  defp normalize_flag_value(@embed, value, _default) when value in [@once, "once"],
+  defp normalize_flag_value(@embed, value, _default) when value in [@once, "once", :once],
     do: :once
 
-  defp normalize_flag_value(@embed, value, _default) when value in [@last, "last"],
+  defp normalize_flag_value(@embed, value, _default) when value in [@last, "last", :last],
     do: :last
 
   defp normalize_flag_value(@embed, value, _default) when is_boolean(value),
