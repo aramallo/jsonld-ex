@@ -15,21 +15,23 @@ defmodule JSON.LD.Compaction do
         active_property,
         options,
         compact_arrays \\ false,
-        ordered \\ false
+        ordered \\ false,
+        frame \\ nil,
+        node_map \\ nil
       )
 
   # 2) If element is a scalar, it is already in its most compact form, so simply return element.
-  def compact(element, _, _, _, _, _)
+  def compact(element, _, _, _, _, _, _, _)
       when is_binary(element) or is_number(element) or is_boolean(element),
       do: element
 
   # 3) If element is an array
-  def compact(element, active_context, active_property, options, compact_arrays, ordered)
+  def compact(element, active_context, active_property, options, compact_arrays, ordered, frame, node_map)
       when is_list(element) do
     # 3.1) and 3.2)
     result =
       Enum.flat_map(element, fn item ->
-        case compact(item, active_context, active_property, options, compact_arrays, ordered) do
+        case compact(item, active_context, active_property, options, compact_arrays, ordered, frame, node_map) do
           nil -> []
           compacted_item -> [compacted_item]
         end
@@ -63,7 +65,7 @@ defmodule JSON.LD.Compaction do
   end
 
   # 4) Otherwise element is a map.
-  def compact(element, active_context, active_property, options, compact_arrays, ordered)
+  def compact(element, active_context, active_property, options, compact_arrays, ordered, frame, node_map)
       when is_map(element) do
     # 1) Initialize type-scoped context to active context. This is used for compacting values that may be relevant to any previous type-scoped context.
     type_scoped_context = active_context
@@ -102,7 +104,7 @@ defmodule JSON.LD.Compaction do
     cond do
       # 7) If element has an @value or @id entry and the result of using the Value Compaction algorithm, passing active context, active property, and element as value is a scalar, or the term definition for active property has a type mapping of @json, return that result.
       Map.has_key?(element, "@value") or Map.has_key?(element, "@id") ->
-        result = compact_value(element, active_context, active_property, options)
+        result = compact_value(element, active_context, active_property, options, frame)
 
         if scalar?(result) || (term_def && term_def.type_mapping == "@json") do
           result
@@ -114,7 +116,9 @@ defmodule JSON.LD.Compaction do
             active_property,
             compact_arrays,
             ordered,
-            options
+            options,
+            frame,
+            node_map
           )
         end
 
@@ -126,7 +130,9 @@ defmodule JSON.LD.Compaction do
           active_property,
           options,
           compact_arrays,
-          ordered
+          ordered,
+          frame,
+          node_map
         )
 
       true ->
@@ -137,7 +143,9 @@ defmodule JSON.LD.Compaction do
           active_property,
           compact_arrays,
           ordered,
-          options
+          options,
+          frame,
+          node_map
         )
     end
   end
@@ -149,7 +157,9 @@ defmodule JSON.LD.Compaction do
          active_property,
          compact_arrays,
          ordered,
-         options
+         options,
+         frame,
+         node_map
        ) do
     # 9) Initialize inside reverse to true if active property equals @reverse, otherwise to false.
     inside_reverse = active_property == "@reverse"
@@ -248,7 +258,9 @@ defmodule JSON.LD.Compaction do
               "@reverse",
               options,
               compact_arrays,
-              ordered
+              ordered,
+              frame,
+              node_map
             )
 
           # Handle nil or non-map compacted_value (from empty array compaction)
@@ -290,7 +302,9 @@ defmodule JSON.LD.Compaction do
               "@reverse",
               options,
               compact_arrays,
-              ordered
+              ordered,
+              frame,
+              node_map
             )
 
           if compacted_value == [] do
@@ -409,6 +423,25 @@ defmodule JSON.LD.Compaction do
                   !compact_arrays
 
               # 12.8.6)
+              # Extract nested frame for this property if frame exists
+              property_frame =
+                if frame != nil and is_map(frame) do
+                  if System.get_env("DEBUG_FRAMING") != nil and item_active_property == "domain" do
+                    IO.puts("\n=== EXTRACTING NESTED FRAME ===")
+                    IO.puts("item_active_property: #{item_active_property}")
+                    IO.puts("frame keys: #{inspect(Map.keys(frame) |> Enum.take(10))}")
+                    IO.puts("frame[domain]: #{inspect(Map.get(frame, "domain"), limit: 3)}")
+                  end
+
+                  case Map.get(frame, item_active_property) do
+                    [first | _] when is_map(first) -> first
+                    val when is_map(val) -> val
+                    _ -> frame  # Use parent frame if no nested frame
+                  end
+                else
+                  frame
+                end
+
               compacted_item =
                 cond do
                   list?(expanded_item) -> expanded_item["@list"]
@@ -420,7 +453,9 @@ defmodule JSON.LD.Compaction do
                   item_active_property,
                   options,
                   compact_arrays,
-                  ordered
+                  ordered,
+                  property_frame,  # Use nested frame
+                  node_map
                 )
 
               cond do
@@ -731,7 +766,11 @@ defmodule JSON.LD.Compaction do
                                 %{"@id" => expanded_item["@id"]},
                                 active_context,
                                 item_active_property,
-                                options
+                                options,
+                                compact_arrays,
+                                ordered,
+                                frame,
+                                node_map
                               )
                             else
                               compacted_item
@@ -1284,16 +1323,16 @@ defmodule JSON.LD.Compaction do
 
   Details at <https://www.w3.org/TR/json-ld-api/#value-compaction>
   """
-  @spec compact_value(any, Context.t(), String.t(), Options.t()) :: any
-  def compact_value(_value, %{inverse_context: nil}, _active_property, _options) do
-    #    compact_value(value, Context.set_inverse(active_context), active_property, options)
+  @spec compact_value(any, Context.t(), String.t(), Options.t(), map | nil) :: any
+  def compact_value(_value, %{inverse_context: nil}, _active_property, _options, _frame) do
+    #    compact_value(value, Context.set_inverse(active_context), active_property, options, frame)
     raise """
     We've encountered an uninitialized inverse context, which shouldn't happen.
     Please raise an issue at https://github.com/rdf-elixir/jsonld-ex/issues with the input document that caused this error.
     """
   end
 
-  def compact_value(value, active_context, active_property, options) do
+  def compact_value(value, active_context, active_property, options, frame \\ nil) do
     term_def = active_context.term_defs[active_property]
 
     # 4) Initialize language to the language mapping for active property in active context, if any, otherwise to the default language of active context.
@@ -1302,11 +1341,31 @@ defmodule JSON.LD.Compaction do
     # 5) Initialize direction to the direction mapping for active property in active context, if any, otherwise to the default base direction of active context.
     direction = Context.TermDefinition.direction(term_def, active_context) |> to_string
 
+    if System.get_env("DEBUG_FRAMING") != nil and active_property == "domain" and is_map(value) and Map.has_key?(value, "@id") do
+      IO.puts("\n=== COMPACT_VALUE for domain ===")
+      IO.puts("Value keys: #{inspect(Map.keys(value))}")
+      IO.puts("Value: #{inspect(value, limit: 5)}")
+      IO.puts("Frame: #{inspect(frame, limit: 3)}")
+    end
+
     result =
       cond do
         # 6) If value has an @id entry and has no other entries other than @index:
         (id = value["@id"]) && map_size(value) == 1 ->
           cond do
+            # Custom: If frame has @embed: @always for this property, OR if frame is explicitly
+            # defined for this property (non-nil), keep full object.
+            # This allows framing to control embedding even with @type: @id in context
+            frame != nil && (has_always_embed_in_frame?(frame, active_property) || is_map(frame)) ->
+              if System.get_env("DEBUG_FRAMING") != nil do
+                IO.puts "=== EMBED CHECK TRIGGERED ==="
+                IO.puts "Property: #{active_property}"
+                IO.puts "Value @id: #{id}"
+                IO.puts "Frame is map: #{is_map(frame)}"
+                IO.puts "========================"
+              end
+              value
+
             # 6.1) If the type mapping of active property is set to @id, set result to the result of IRI compacting the value associated with the @id entry using false for vocab.
             term_def && term_def.type_mapping == "@id" ->
               compact_iri(id, active_context, options, nil, false)
@@ -1369,11 +1428,22 @@ defmodule JSON.LD.Compaction do
       end
 
     # 11) If result is a map, replace each key in result with the result of IRI compacting that key.
-    if is_map(result) do
+    final_result = if is_map(result) do
       Map.new(result, fn {k, v} -> {compact_iri(k, active_context, options), v} end)
     else
       result
     end
+
+    if System.get_env("DEBUG_FRAMING") != nil and active_property == "domain" and is_map(value) and Map.has_key?(value, "@id") do
+      IO.puts("compact_value RETURNING:")
+      IO.puts("  keys: #{inspect(Map.keys(final_result || %{}))}")
+      if is_map(final_result) and map_size(final_result) <= 2 do
+        IO.puts("  MINIMAL: #{inspect(final_result)}")
+      end
+      IO.puts("================================\n")
+    end
+
+    final_result
   end
 
   @doc """
@@ -1406,4 +1476,41 @@ defmodule JSON.LD.Compaction do
       end
     end)
   end
+
+  # Helper function to check if a property in the frame has @embed: @always
+  # This allows framing to control embedding even when context has @type: @id
+  defp has_always_embed_in_frame?(frame, property) when is_map(frame) do
+    if System.get_env("DEBUG_FRAMING") do
+      IO.puts "=== CHECKING FRAME FOR @EMBED ==="
+      IO.puts "Property: #{inspect(property)}"
+      IO.puts "Frame keys: #{inspect(Map.keys(frame) |> Enum.take(5))}"
+      IO.puts "Property in frame: #{Map.has_key?(frame, property)}"
+    end
+
+    # Get the property frame (handle both direct and array-wrapped frames)
+    property_frame =
+      case Map.get(frame, property) do
+        [first | _] when is_map(first) -> first
+        val when is_map(val) -> val
+        _ -> nil
+      end
+
+    # Check if property frame has @embed: @always
+    result =
+      case property_frame do
+        %{"@embed" => "@always"} -> true
+        %{"@embed" => true} -> true
+        _ -> false
+      end
+
+    if System.get_env("DEBUG_FRAMING") do
+      IO.puts "Property frame: #{inspect(property_frame, limit: 3)}"
+      IO.puts "Result: #{result}"
+      IO.puts "=======================\n"
+    end
+
+    result
+  end
+
+  defp has_always_embed_in_frame?(_frame, _property), do: false
 end
