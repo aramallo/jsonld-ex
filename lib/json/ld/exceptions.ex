@@ -540,4 +540,24 @@ defmodule JSON.LD.Error do
       message: "#{inspect(term)} is a protected term and cannot be redefined"
     )
   end
+
+  @doc """
+  An invalid frame has been detected.
+  """
+  def invalid_frame(message) do
+    exception(
+      code: "invalid frame",
+      message: message
+    )
+  end
+
+  @doc """
+  An invalid @embed value has been detected.
+  """
+  def invalid_embed_value(message) do
+    exception(
+      code: "invalid @embed value",
+      message: message
+    )
+  end
 end

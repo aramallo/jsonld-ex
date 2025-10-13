@@ -198,7 +198,7 @@ defmodule JSON.LD.Expansion do
           end
 
           cond do
-            # 15.2) 
+            # 15.2)
             result["@type"] == "@json" ->
               result
 
@@ -207,6 +207,10 @@ defmodule JSON.LD.Expansion do
               nil
 
             # 15.4)
+            # Skip validation for frame expansion - allow arrays and wildcards
+            processor_options.frame_expansion ->
+              result
+
             !is_binary(value) and Map.has_key?(result, "@language") ->
               raise JSON.LD.Error.invalid_language_tagged_value(
                       "@value '#{inspect(value)}' is tagged with a language"
@@ -278,10 +282,22 @@ defmodule JSON.LD.Expansion do
             expand_iri(key, active_context, processor_options, false, true)
 
           keyword? = JSON.LD.keyword?(expanded_property)
+          # Check if this is a framing keyword (only valid during frame expansion)
+          framing_keyword? =
+            frame_expansion and
+              expanded_property in [
+                "@default",
+                "@embed",
+                "@explicit",
+                "@omitDefault",
+                "@requireAll"
+              ]
+
           # 13.3)
-          if expanded_property && (String.contains?(expanded_property, ":") || keyword?) do
+          if expanded_property &&
+               (String.contains?(expanded_property, ":") || keyword? || framing_keyword?) do
             # 13.4)
-            if keyword? do
+            if keyword? or framing_keyword? do
               # 13.4.1)
               if active_property == "@reverse" do
                 raise JSON.LD.Error.invalid_reverse_property_map()
@@ -300,7 +316,54 @@ defmodule JSON.LD.Expansion do
                   "@id" ->
                     cond do
                       is_binary(value) ->
-                        expand_iri(value, active_context, processor_options, true, false)
+                        expanded =
+                          expand_iri(value, active_context, processor_options, true, false)
+
+                        # Validate: frames must not contain blank node identifiers in @id
+                        if frame_expansion and is_binary(expanded) and
+                             String.starts_with?(expanded, "_:") do
+                          raise JSON.LD.Error.invalid_frame(
+                                  "@id value cannot be a blank node identifier"
+                                )
+                        end
+
+                        expanded
+
+                      frame_expansion and is_list(value) and
+                          Enum.all?(value, fn v -> v == %{} or is_binary(v) or is_map(v) end) ->
+                        Enum.map(value, fn
+                          %{} = item when map_size(item) == 0 ->
+                            item
+
+                          item when is_map(item) ->
+                            # Handle @default in @id for frames
+                            active_context
+                            |> expand("@id", item, options, processor_options)
+                            |> List.wrap()
+                            |> hd()
+
+                          item ->
+                            expanded =
+                              expand_iri(item, active_context, processor_options, true, false)
+
+                            # Validate: frames must not contain blank node identifiers in @id
+                            if is_binary(expanded) and String.starts_with?(expanded, "_:") do
+                              raise JSON.LD.Error.invalid_frame(
+                                      "@id value cannot be a blank node identifier"
+                                    )
+                            end
+
+                            expanded
+                        end)
+
+                      frame_expansion and value == %{} ->
+                        [value]
+
+                      frame_expansion and is_map(value) ->
+                        # Handle @default in @id for frames
+                        active_context
+                        |> expand("@id", value, options, processor_options)
+                        |> List.wrap()
 
                       true ->
                         raise JSON.LD.Error.invalid_id_value(value)
@@ -311,12 +374,76 @@ defmodule JSON.LD.Expansion do
                     expanded_value =
                       cond do
                         is_binary(value) ->
-                          expand_iri(value, type_scoped_context, processor_options, true, true)
+                          expanded =
+                            expand_iri(value, type_scoped_context, processor_options, true, true)
+
+                          # Validate: frames must not contain blank node identifiers in @type
+                          if frame_expansion and is_binary(expanded) and
+                               String.starts_with?(expanded, "_:") do
+                            raise JSON.LD.Error.invalid_frame(
+                                    "@type value cannot be a blank node identifier"
+                                  )
+                          end
+
+                          expanded
 
                         is_list(value) and Enum.all?(value, &is_binary/1) ->
                           Enum.map(value, fn item ->
-                            expand_iri(item, type_scoped_context, processor_options, true, true)
+                            expanded =
+                              expand_iri(item, type_scoped_context, processor_options, true, true)
+
+                            # Validate: frames must not contain blank node identifiers in @type
+                            if frame_expansion and is_binary(expanded) and
+                                 String.starts_with?(expanded, "_:") do
+                              raise JSON.LD.Error.invalid_frame(
+                                      "@type value cannot be a blank node identifier"
+                                    )
+                            end
+
+                            expanded
                           end)
+
+                        frame_expansion and is_list(value) and
+                            Enum.all?(value, fn v -> v == %{} or is_binary(v) or is_map(v) end) ->
+                          Enum.map(value, fn
+                            %{} = item when map_size(item) == 0 ->
+                              item
+
+                            item when is_map(item) ->
+                              # Handle @default in @type for frames
+                              active_context
+                              |> expand("@type", item, options, processor_options)
+                              |> List.wrap()
+                              |> hd()
+
+                            item ->
+                              expanded =
+                                expand_iri(
+                                  item,
+                                  type_scoped_context,
+                                  processor_options,
+                                  true,
+                                  true
+                                )
+
+                              # Validate: frames must not contain blank node identifiers in @type
+                              if is_binary(expanded) and String.starts_with?(expanded, "_:") do
+                                raise JSON.LD.Error.invalid_frame(
+                                        "@type value cannot be a blank node identifier"
+                                      )
+                              end
+
+                              expanded
+                          end)
+
+                        frame_expansion and value == %{} ->
+                          [value]
+
+                        frame_expansion and is_map(value) ->
+                          # Handle @default in @type for frames
+                          active_context
+                          |> expand("@type", value, options, processor_options)
+                          |> List.wrap()
 
                         true ->
                           raise JSON.LD.Error.invalid_type_value(value)
@@ -493,10 +620,26 @@ defmodule JSON.LD.Expansion do
                   # 13.4.15)
                   expanded_property
                   when frame_expansion and
-                         expanded_property in ~w[@default @embed @explicit @omitDefault @requireAll] ->
-                    active_context
-                    |> expand(expanded_property, value, options, processor_options)
-                    |> List.wrap()
+                         expanded_property in [
+                           "@default",
+                           "@embed",
+                           "@explicit",
+                           "@omitDefault",
+                           "@requireAll"
+                         ] ->
+                    # Validate @embed value
+                    if expanded_property == "@embed" do
+                      valid_embed_values = ["@always", "@never", "@once", "@last", true, false]
+
+                      unless value in valid_embed_values do
+                        raise JSON.LD.Error.invalid_embed_value(
+                                "Invalid @embed value: #{inspect(value)}. Must be one of: @always, @never, @once, @last, true, or false"
+                              )
+                      end
+                    end
+
+                    # For framing keywords, just return the value directly (don't expand)
+                    value
 
                   _ ->
                     nil
@@ -529,7 +672,7 @@ defmodule JSON.LD.Expansion do
                     |> maybe_sort_by(processor_options.ordered, fn {language, _} -> language end)
                     |> Enum.flat_map(fn {language, language_value} ->
                       expanded_language =
-                        expand_iri(language, active_context, options, false, true)
+                        expand_iri(language, active_context, processor_options, false, true)
 
                       language_value
                       |> List.wrap()
@@ -597,7 +740,8 @@ defmodule JSON.LD.Expansion do
 
                       # 13.8.3.4)
                       # SPEC ISSUE: which context should be used here?
-                      expanded_index = expand_iri(index, map_context, options, false, true)
+                      expanded_index =
+                        expand_iri(index, map_context, processor_options, false, true)
 
                       # 13.8.3.6)
                       map_context

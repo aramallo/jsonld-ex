@@ -39,16 +39,26 @@ defmodule JSON.LD.Compaction do
     term_def = active_context.term_defs[active_property]
     container_mapping = List.wrap(term_def && term_def.container_mapping)
 
-    if not compact_arrays or
-         active_property in ~w[@graph @set] or
-         "@list" in container_mapping or
-         "@set" in container_mapping do
-      result
-    else
-      case result do
-        [value] -> value
-        result -> result
-      end
+    cond do
+      # If result is empty and there's no container, compact to nil
+      # Normative: Empty arrays without @container should compact to null
+      result == [] and active_property not in ~w[@graph @set] and
+        "@list" not in container_mapping and "@set" not in container_mapping ->
+        nil
+
+      # Don't unwrap single-element arrays if compact_arrays is false or for special properties
+      not compact_arrays or
+        active_property in ~w[@graph @set] or
+        "@list" in container_mapping or
+          "@set" in container_mapping ->
+        result
+
+      # Unwrap single-element arrays
+      true ->
+        case result do
+          [value] -> value
+          result -> result
+        end
     end
   end
 
@@ -241,27 +251,33 @@ defmodule JSON.LD.Compaction do
               ordered
             )
 
-          # 12.3.2)
-          {compacted_value, result} =
-            Enum.reduce(compacted_value, {%{}, result}, fn {property, value},
-                                                           {compacted_value, result} ->
-              term_def = active_context.term_defs[property]
-
-              if term_def && term_def.reverse_property do
-                as_array = term_def.container_mapping == "@set" or !compact_arrays
-
-                {compacted_value, merge_compacted_value(result, property, value, as_array)}
-              else
-                {Map.put(compacted_value, property, value), result}
-              end
-            end)
-
-          # 12.3.3)
-          unless Enum.empty?(compacted_value) do
-            alias = compact_iri("@reverse", active_context, options)
-            Map.put(result, alias, compacted_value)
-          else
+          # Handle nil or non-map compacted_value (from empty array compaction)
+          # Normative: If @reverse compaction returns nil, skip processing
+          if is_nil(compacted_value) or not is_map(compacted_value) do
             result
+          else
+            # 12.3.2)
+            {compacted_value, result} =
+              Enum.reduce(compacted_value, {%{}, result}, fn {property, value},
+                                                             {compacted_value, result} ->
+                term_def = active_context.term_defs[property]
+
+                if term_def && term_def.reverse_property do
+                  as_array = term_def.container_mapping == "@set" or !compact_arrays
+
+                  {compacted_value, merge_compacted_value(result, property, value, as_array)}
+                else
+                  {Map.put(compacted_value, property, value), result}
+                end
+              end)
+
+            # 12.3.3)
+            unless Enum.empty?(compacted_value) do
+              alias = compact_iri("@reverse", active_context, options)
+              Map.put(result, alias, compacted_value)
+            else
+              result
+            end
           end
 
         # 12.4)
@@ -313,6 +329,19 @@ defmodule JSON.LD.Compaction do
             # 12.7.2)
             term_def = active_context.term_defs[item_active_property]
 
+            # Determine the value to use: nil if no special container, [] otherwise
+            # Normative: Empty arrays without @container should compact to null
+            # Exception: @graph should preserve empty arrays
+            container_mapping = List.wrap(term_def && term_def.container_mapping)
+
+            compacted_empty_value =
+              if "@list" in container_mapping or "@set" in container_mapping or
+                   item_active_property == "@graph" do
+                []
+              else
+                nil
+              end
+
             if nest_term = term_def && term_def.nest_value do
               # 12.7.2.1) If nest term is not @nest, or a term in the active context that expands to @nest, an invalid @nest value error has been detected, and processing is aborted.
               nest_term_def = active_context.term_defs[nest_term]
@@ -325,12 +354,17 @@ defmodule JSON.LD.Compaction do
               end
 
               # 12.7.2.2 and 12.7.2.2) with 12.7.3 and 12.7.4) in nest case
-              Map.update(result, nest_term, %{item_active_property => []}, fn value ->
-                merge_compacted_value(value, item_active_property, [], true)
-              end)
+              Map.update(
+                result,
+                nest_term,
+                %{item_active_property => compacted_empty_value},
+                fn value ->
+                  merge_compacted_value(value, item_active_property, compacted_empty_value, true)
+                end
+              )
             else
               # 12.7.3 and 12.7.4) (non-nest case)
-              merge_compacted_value(result, item_active_property, [], true)
+              merge_compacted_value(result, item_active_property, compacted_empty_value, true)
             end
           else
             # 12.8)
@@ -760,7 +794,16 @@ defmodule JSON.LD.Compaction do
   end
 
   defp merge_compacted_value(map, key, value, as_array) do
-    Map.update(map, key, if(as_array and not is_list(value), do: [value], else: value), fn
+    # Special case: nil values should not be wrapped in arrays (they represent null)
+    # Normative: null values from empty arrays should remain as null, not [null]
+    default_value =
+      if is_nil(value) do
+        nil
+      else
+        if(as_array and not is_list(value), do: [value], else: value)
+      end
+
+    Map.update(map, key, default_value, fn
       old_value when is_list(old_value) and is_list(value) -> old_value ++ value
       old_value when is_list(old_value) -> old_value ++ [value]
       old_value when is_list(value) -> [old_value | value]

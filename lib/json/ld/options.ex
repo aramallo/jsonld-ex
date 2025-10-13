@@ -71,7 +71,20 @@ defmodule JSON.LD.Options do
           produce_generalized_rdf: boolean,
           processing_mode: String.t(),
           lowercase_language: boolean,
-          warn: warn_method()
+          warn: warn_method(),
+          # Framing options (https://www.w3.org/TR/json-ld11-framing/)
+          # Sets the value object embed flag used in the Framing Algorithm.
+          # Values: :once (default), :always, :never, :last, or string versions "@once", "@always", "@never", "@last"
+          embed: atom | String.t() | nil,
+          # Sets the value of the explicit inclusion flag used in the Framing Algorithm.
+          # If true, only properties explicitly mentioned in the frame will be included in the output.
+          explicit: boolean | nil,
+          # Sets the value of the omit default flag used in the Framing Algorithm.
+          # If true, properties with null values will be omitted from the output.
+          omit_default: boolean | nil,
+          # Sets the value of the require all flag used in the Framing Algorithm.
+          # If true, all properties in the frame must match for a node to be included.
+          require_all: boolean | nil
         }
 
   @type convertible :: t | keyword | Enum.t()
@@ -92,7 +105,12 @@ defmodule JSON.LD.Options do
             produce_generalized_rdf: true,
             processing_mode: "json-ld-1.1",
             lowercase_language: true,
-            warn: :default
+            warn: :default,
+            # Framing options with defaults per spec
+            embed: nil,
+            explicit: nil,
+            omit_default: nil,
+            require_all: nil
 
   def warn_default, do: Application.get_env(:json_ld, :warn, :log)
 

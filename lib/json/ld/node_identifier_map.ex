@@ -13,7 +13,10 @@ defmodule JSON.LD.NodeIdentifierMap do
   @spec new() :: :ets.tid()
 
   def new() do
-    struct!(__MODULE__, tab: :ets.new(:undefined, [:set, {:keypos, 1}]))
+    tab = :ets.new(:undefined, [:set, {:keypos, 1}])
+    # Initialize counter at 0
+    :ets.insert(tab, {:__counter__, 0})
+    struct!(__MODULE__, tab: tab)
   end
 
   @doc """
@@ -35,14 +38,14 @@ defmodule JSON.LD.NodeIdentifierMap do
 
   def generate_blank_node_id(map, identifier \\ nil)
 
-  def generate_blank_node_id(%__MODULE__{}, nil) do
-    blank_node_id()
+  def generate_blank_node_id(%__MODULE__{tab: tab}, nil) do
+    blank_node_id(tab)
   end
 
   def generate_blank_node_id(%__MODULE__{tab: tab}, identifier) do
     case :ets.lookup(tab, identifier) do
       [] ->
-        blank_node_id = blank_node_id()
+        blank_node_id = blank_node_id(tab)
         :ets.insert(tab, {identifier, blank_node_id})
         blank_node_id
 
@@ -51,5 +54,9 @@ defmodule JSON.LD.NodeIdentifierMap do
     end
   end
 
-  defp blank_node_id(), do: "_:b#{System.unique_integer([:monotonic, :positive])}"
+  defp blank_node_id(tab) do
+    # Atomically increment and get the counter from ETS
+    counter = :ets.update_counter(tab, :__counter__, 1)
+    "_:b#{counter - 1}"
+  end
 end

@@ -22,13 +22,13 @@ The API documentation can be found [here](https://hexdocs.pm/json_ld/). For a gu
 
 - fully conforming JSON-LD 1.1 API processor
 - JSON-LD reader/writer for [RDF.ex]
+- JSON-LD Framing support
 - customizable HTTP client for remote document loading
 - tests of the [JSON-LD test suite] (see [here](https://github.com/rdf-elixir/jsonld-ex/tree/master/earl_reports) for the EARL reports)
 
 
 ## TODO
 
-- [JSON-LD Framing]
 - [JSON-LD HTML Content Algorithms]
 
 
@@ -102,10 +102,65 @@ produces
         "@type" => "@id"},
     "name" => "http://xmlns.com/foaf/0.1/name"
     },
-  "homepage" => "http://manu.sporny.org/", 
+  "homepage" => "http://manu.sporny.org/",
   "name" => "Manu Sporny"}
 ```
 
+### Frame a document
+
+```elixir
+input = Jason.decode! """
+{
+  "@context": {
+    "dc": "http://purl.org/dc/elements/1.1/",
+    "ex": "http://example.org/vocab#"
+  },
+  "@graph": [
+    {
+      "@id": "http://example.org/library",
+      "@type": "ex:Library",
+      "ex:contains": "http://example.org/book1"
+    },
+    {
+      "@id": "http://example.org/book1",
+      "@type": "ex:Book",
+      "dc:title": "Example Book"
+    }
+  ]
+}
+"""
+
+frame = Jason.decode! """
+{
+  "@context": {
+    "dc": "http://purl.org/dc/elements/1.1/",
+    "ex": "http://example.org/vocab#"
+  },
+  "@type": "ex:Library",
+  "ex:contains": {}
+}
+"""
+
+JSON.LD.frame(input, frame)
+```
+
+produces
+
+```elixir
+%{
+  "@context" => %{
+    "dc" => "http://purl.org/dc/elements/1.1/",
+    "ex" => "http://example.org/vocab#"
+  },
+  "@id" => "http://example.org/library",
+  "@type" => "ex:Library",
+  "ex:contains" => %{
+    "@id" => "http://example.org/book1",
+    "@type" => "ex:Book",
+    "dc:title" => "Example Book"
+  }
+}
+```
 
 ## RDF Reader and Writer
 

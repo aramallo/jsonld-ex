@@ -16,6 +16,7 @@ defmodule JSON.LD do
     Context,
     Expansion,
     Flattening,
+    Framing,
     DocumentLoader,
     Encoder,
     Decoder,
@@ -228,7 +229,7 @@ defmodule JSON.LD do
     # 9)
     result =
       case Compaction.compact(expanded, active_context, nil, popts, popts.compact_arrays) do
-        [] ->
+        result when result in [[], nil] ->
           %{}
 
         result when is_list(result) ->
@@ -352,6 +353,64 @@ defmodule JSON.LD do
 
   defp normalize_context(list) when is_list(list), do: Enum.map(list, &normalize_context/1)
   defp normalize_context(value), do: value
+
+  @doc """
+  Frames the given input according to the steps in the JSON-LD Framing Algorithm.
+
+  > Framing is used to shape the data in a JSON-LD document, using an example
+  > frame document which is used to both match the flattened data and show an
+  > example of how the resulting data should be shaped.
+
+  -- <https://www.w3.org/TR/json-ld11-framing/#framing>
+
+  Details at <https://www.w3.org/TR/json-ld11-framing/#framing-algorithm>
+
+  This is the `frame()` API function of the `JsonLdProcessor` interface as specified in
+  <https://www.w3.org/TR/json-ld11-framing/#the-application-programming-interface>
+
+  ## Options
+
+  The following framing-specific options are supported:
+
+  - `:embed` - Sets the embed flag. Values: `:once` (default), `:always`, `:never`, `:last`
+  - `:explicit` - If `true`, only properties present in the frame will be included in the output (default: `false`)
+  - `:omit_default` - If `true`, properties with default values will be omitted from the output (default: `false`)
+  - `:require_all` - If `true`, all properties in the frame must match for a node to be included (default: `false`)
+
+  ## Example
+
+      frame = %{
+        "@context" => %{"@vocab" => "http://example.org/"},
+        "@type" => "Library",
+        "contains" => %{
+          "@type" => "Book",
+          "contains" => %{
+            "@type" => "Chapter"
+          }
+        }
+      }
+
+      JSON.LD.frame(input, frame)
+  """
+  @spec frame(input(), map, Options.convertible()) :: map
+  def frame(input, frame, options \\ []) do
+    {processor_options, _options} = Options.extract(options)
+    do_frame(input, frame, processor_options)
+  end
+
+  defp do_frame(%IRI{} = iri, frame, processor_options),
+    do: iri |> IRI.to_string() |> do_frame(frame, processor_options)
+
+  defp do_frame(url, frame, processor_options) when is_binary(url) do
+    case DocumentLoader.load(url, processor_options) do
+      {:ok, document} -> do_frame(document, frame, processor_options)
+      {:error, error} -> raise error
+    end
+  end
+
+  defp do_frame(input, frame, processor_options) do
+    Framing.frame(input, frame, processor_options)
+  end
 
   @doc """
   Generator function for JSON-LD node maps.
