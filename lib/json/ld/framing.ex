@@ -186,7 +186,7 @@ defmodule JSON.LD.Framing do
       # Use the current_graph determined earlier (named graph or @default)
       graph_to_frame = node_map[current_graph] || %{}
 
-      matches = match_frame(state, Map.keys(graph_to_frame), frame_obj, nil)
+      {matches, _final_state} = match_frame(state, Map.keys(graph_to_frame), frame_obj, nil)
 
       # Step 8: Create result with @graph
       # Normative: https://www.w3.org/TR/json-ld11-framing/#framing-algorithm Step 8
@@ -258,23 +258,49 @@ defmodule JSON.LD.Framing do
   - `parent` - Parent subject ID (for tracking)
 
   ## Returns
-  List of matched and embedded nodes
+  Tuple of {list of matched and embedded nodes, updated state}
   """
-  @spec match_frame(map, [String.t()], map, String.t() | nil) :: [map]
+  @spec match_frame(map, [String.t()], map, String.t() | nil) :: {[map], map}
   def match_frame(state, subjects, frame, parent) do
     # Create cache key for this frame matching operation
     frame_key = :erlang.phash2(frame)
 
-    subjects
-    # Filter subjects that match the frame (with caching)
-    |> Enum.filter(fn id -> filter_subjects_cached(state, id, frame, frame_key) end)
+    matched_subjects =
+      subjects
+      # Filter subjects that match the frame (with caching)
+      |> Enum.filter(fn id -> filter_subjects_cached(state, id, frame, frame_key) end)
+
     # Embed each matched subject
-    |> Enum.flat_map(fn id ->
-      case embed_node(state, id, frame, parent) do
-        nil -> []
-        node -> [node]
-      end
-    end)
+    # For top-level matches (parent == nil), each gets independent embedding context
+    # For nested matches (parent != nil), thread state across siblings
+    if parent == nil do
+      # Top-level: Independent embedding context for each tree
+      {nodes, _final_state} =
+        matched_subjects
+        |> Enum.map_reduce(state, fn id, _acc_state ->
+          # Reset embedded map for each top-level tree
+          fresh_state = %{state | embedded: %{}}
+
+          case embed_node(fresh_state, id, frame, parent) do
+            {nil, _} -> {[], state}
+            {node, _} -> {[node], state}
+          end
+        end)
+
+      {List.flatten(nodes), state}
+    else
+      # Nested: Thread state across siblings to maintain @once semantics within tree
+      matched_subjects
+      |> Enum.map_reduce(state, fn id, acc_state ->
+        case embed_node(acc_state, id, frame, parent) do
+          {nil, new_state} -> {[], new_state}
+          {node, new_state} -> {[node], new_state}
+        end
+      end)
+      |> then(fn {nested_nodes, final_state} ->
+        {List.flatten(nested_nodes), final_state}
+      end)
+    end
   end
 
   # Filter subjects with caching to improve performance
@@ -712,60 +738,63 @@ defmodule JSON.LD.Framing do
   - `parent` - Parent node ID
 
   ## Returns
-  The embedded node map
+  Tuple of {embedded node map, updated state}
   """
-  @spec embed_node(map, String.t(), map, String.t() | nil) :: map | nil
+  @spec embed_node(map, String.t(), map, String.t() | nil) :: {map | nil, map}
   def embed_node(state, id, frame, parent) do
     node = get_node(state, id)
 
     # Return nil if node doesn't exist
-    if Enum.empty?(node), do: nil
+    if Enum.empty?(node) do
+      {nil, state}
+    else
+      # Determine embedding behavior
+      # Normative: @embed flag processing
+      embed_value = get_frame_flag(frame, @embed, state.embed)
 
-    # Determine embedding behavior
-    # Normative: @embed flag processing
-    embed_value = get_frame_flag(frame, @embed, state.embed)
+      # Top-level matched nodes (parent == nil) should always be fully embedded
+      # @embed flag only applies to referenced nodes (parent != nil)
+      is_top_level_match = parent == nil
 
-    # Top-level matched nodes (parent == nil) should always be fully embedded
-    # @embed flag only applies to referenced nodes (parent != nil)
-    is_top_level_match = parent == nil
+      # Check for circular reference - if node is in the current embedding chain
+      # Normative: Prevent infinite recursion in circular references
+      is_circular = id in state.subject_stack
 
-    # Check for circular reference - if node is in the current embedding chain
-    # Normative: Prevent infinite recursion in circular references
-    is_circular = id in state.subject_stack
+      # Check if already embedded
+      embedded_node = Map.get(state.embedded, id)
 
-    # Check if already embedded
-    embedded_node = Map.get(state.embedded, id)
+      cond do
+        # Circular reference detected - always return just a reference
+        # Normative: Circular references must be broken to avoid infinite embedding
+        is_circular ->
+          {%{@id => id}, state}
 
-    cond do
-      # Circular reference detected - always return just a reference
-      # Normative: Circular references must be broken to avoid infinite embedding
-      is_circular ->
-        %{@id => id}
+        # Never embed - return node reference (only for referenced nodes, not top-level matches)
+        # Normative: @embed: @never behavior
+        embed_value == :never and not is_top_level_match ->
+          {%{@id => id}, state}
 
-      # Never embed - return node reference (only for referenced nodes, not top-level matches)
-      # Normative: @embed: @never behavior
-      embed_value == :never and not is_top_level_match ->
-        %{@id => id}
+        # Already embedded with @once - return reference (but NOT for top-level matches)
+        # Normative: @embed: @once behavior (default)
+        # Top-level matches should always be fully embedded regardless of prior embedding
+        embedded_node != nil and embed_value == :once and not is_top_level_match ->
+          {%{@id => id}, state}
 
-      # Already embedded with @once - return reference
-      # Normative: @embed: @once behavior (default)
-      embedded_node != nil and embed_value == :once ->
-        %{@id => id}
+        # @last: replace previous embedding (not fully implemented - requires backtracking)
+        # For now, treat as @once for memory efficiency (but NOT for top-level matches)
+        embedded_node != nil and embed_value == :last and not is_top_level_match ->
+          {%{@id => id}, state}
 
-      # @last: replace previous embedding (not fully implemented - requires backtracking)
-      # For now, treat as @once for memory efficiency
-      embedded_node != nil and embed_value == :last ->
-        %{@id => id}
-
-      # Embed the node
-      # Normative: @embed: @always or first embedding with @once
-      true ->
-        # Mark as embedded (lightweight - just store true)
-        state = put_in(state.embedded[id], true)
-        # Add to subject stack for circular reference detection
-        state = %{state | subject_stack: [id | state.subject_stack]}
-        output = create_output_node(state, node, frame, id)
-        output
+        # Embed the node
+        # Normative: @embed: @always or first embedding with @once or top-level match
+        true ->
+          # Mark as embedded (lightweight - just store true)
+          state = put_in(state.embedded[id], true)
+          # Add to subject stack for circular reference detection
+          state = %{state | subject_stack: [id | state.subject_stack]}
+          {output, final_state} = create_output_node(state, node, frame, id)
+          {output, final_state}
+      end
     end
   end
 
@@ -903,29 +932,30 @@ defmodule JSON.LD.Framing do
         Enum.uniq(node_props ++ frame_props)
       end
 
-    # Process properties and add to output
+    # Process properties and add to output with state threading
     # Use streaming to minimize memory usage
-    output =
+    {output, state_after_props} =
       properties
       |> Stream.filter(&(&1 not in @excluded_from_properties))
-      |> Enum.reduce(output, fn property, acc ->
-        add_property_to_output(state, node, frame, property, acc, omit_default, id)
+      |> Enum.reduce({output, state}, fn property, {acc_output, acc_state} ->
+        add_property_to_output(acc_state, node, frame, property, acc_output, omit_default, id)
       end)
 
     # Handle @reverse - add nodes that point to this node
     # Normative: @reverse framing adds reversed relationships to output
-    output =
+    {output, final_state} =
       if Map.has_key?(frame, @reverse) do
-        add_reverse_to_output(state, node, frame[@reverse], output, id)
+        add_reverse_to_output(state_after_props, node, frame[@reverse], output, id)
       else
-        output
+        {output, state_after_props}
       end
 
-    output
+    {output, final_state}
   end
 
   # Add a single property to the output
   # Memory-efficient: processes one property at a time
+  # Returns: {updated_output, updated_state}
   defp add_property_to_output(state, node, frame, property, output, omit_default, parent_id) do
     cond do
       # Property exists in node
@@ -1037,15 +1067,14 @@ defmodule JSON.LD.Framing do
             filtered_values
           end
 
-        # Process each filtered value lazily
-        processed_values =
+        # Process each filtered value with state threading
+        {processed_values, final_state} =
           filtered_values
-          |> Stream.map(fn value ->
-            process_value(state, value, property_frame, parent_id)
+          |> Enum.map_reduce(state, fn value, acc_state ->
+            process_value(acc_state, value, property_frame, parent_id)
           end)
-          |> Enum.to_list()
 
-        Map.put(output, property, processed_values)
+        {Map.put(output, property, processed_values), final_state}
 
       # Property in frame but not in node - add default if @omitDefault is false
       # Normative: @default and @omitDefault processing
@@ -1064,7 +1093,7 @@ defmodule JSON.LD.Framing do
 
         # Skip if property-level @omitDefault is true
         if property_omit_default do
-          output
+          {output, state}
         else
           # Check if property frame has @default
           if Map.has_key?(property_frame, @default) do
@@ -1079,37 +1108,40 @@ defmodule JSON.LD.Framing do
             # Special handling for @null as default value
             # Normative: @null in @default means use empty array (compacts to null or [])
             if default_value == "@null" do
-              Map.put(output, property, [])
+              {Map.put(output, property, []), state}
             else
               # Wrap default value in array to match expanded form expectations
-              Map.put(output, property, List.wrap(default_value))
+              {Map.put(output, property, List.wrap(default_value)), state}
             end
           else
             # No @default - add empty array (will compact to null)
             # Per spec: properties in frame but not in node should be null if no @default
-            Map.put(output, property, [])
+            {Map.put(output, property, []), state}
           end
         end
 
       # Property not in frame or node - skip
       true ->
-        output
+        {output, state}
     end
   end
 
   # Add @reverse relationships to output
   # Normative: Collect nodes that point to this node via specified properties
+  # Returns: {updated_output, updated_state}
   defp add_reverse_to_output(state, _node, reverse_frame, output, node_id) do
     # Get the actual reverse frame map (unwrap from array if needed)
     reverse_frame_map = List.wrap(reverse_frame) |> List.first(%{})
 
     # For each property in @reverse frame, find nodes that point to this node
-    reverse_map =
-      Enum.reduce(reverse_frame_map, %{}, fn {reverse_prop, prop_frame}, acc ->
+    # Thread state through the reduce
+    {reverse_map, final_state} =
+      Enum.reduce(reverse_frame_map, {%{}, state}, fn {reverse_prop, prop_frame},
+                                                       {acc_map, acc_state} ->
         # Find all nodes that have reverse_prop pointing to this node
-        current_graph = Map.get(state.graph_map, state.current_graph, %{})
+        current_graph = Map.get(acc_state.graph_map, acc_state.current_graph, %{})
 
-        referencing_nodes =
+        referencing_node_ids =
           current_graph
           |> Enum.filter(fn {_id, candidate_node} ->
             # Get values of reverse_prop in candidate_node
@@ -1120,8 +1152,12 @@ defmodule JSON.LD.Framing do
               is_map(value) and Map.get(value, @id) == node_id
             end)
           end)
-          |> Enum.flat_map(fn {ref_id, _} ->
-            # Frame each referencing node
+          |> Enum.map(fn {ref_id, _} -> ref_id end)
+
+        # Frame each referencing node with state threading
+        {referencing_nodes, new_state} =
+          referencing_node_ids
+          |> Enum.map_reduce(acc_state, fn ref_id, thread_state ->
             # Get the property-specific frame (unwrap if needed)
             property_frame =
               case prop_frame do
@@ -1130,30 +1166,37 @@ defmodule JSON.LD.Framing do
                 _ -> %{}
               end
 
-            case embed_node(state, ref_id, property_frame, node_id) do
-              nil -> []
-              embedded -> [embedded]
+            case embed_node(thread_state, ref_id, property_frame, node_id) do
+              {nil, updated_state} -> {[], updated_state}
+              {embedded, updated_state} -> {[embedded], updated_state}
             end
+          end)
+          |> then(fn {nested_nodes, final_thread_state} ->
+            {List.flatten(nested_nodes), final_thread_state}
           end)
 
         # Add to reverse map if any nodes found
-        if Enum.empty?(referencing_nodes) do
-          acc
-        else
-          Map.put(acc, reverse_prop, referencing_nodes)
-        end
+        updated_map =
+          if Enum.empty?(referencing_nodes) do
+            acc_map
+          else
+            Map.put(acc_map, reverse_prop, referencing_nodes)
+          end
+
+        {updated_map, new_state}
       end)
 
     # Add @reverse to output if any reversed relationships found
     if Enum.empty?(reverse_map) do
-      output
+      {output, final_state}
     else
-      Map.put(output, @reverse, reverse_map)
+      {Map.put(output, @reverse, reverse_map), final_state}
     end
   end
 
   # Process a value (node reference or value object)
   # Memory-efficient: avoids creating intermediate structures
+  # Returns: {processed_value, updated_state}
   defp process_value(state, value, frame, parent) do
     cond do
       # List object
@@ -1161,17 +1204,18 @@ defmodule JSON.LD.Framing do
       list?(value) ->
         list_values = value[@list] |> List.wrap()
 
-        processed =
+        {processed, final_state} =
           list_values
-          |> Stream.map(&process_value(state, &1, frame, parent))
-          |> Enum.to_list()
+          |> Enum.map_reduce(state, fn list_item, acc_state ->
+            process_value(acc_state, list_item, frame, parent)
+          end)
 
-        %{@list => processed}
+        {%{@list => processed}, final_state}
 
       # Value object - pass through
       # Normative: Value objects are not recursively framed
       value?(value) ->
-        value
+        {value, state}
 
       # Node reference - embed or reference
       # Normative: Recursive node embedding
@@ -1192,27 +1236,30 @@ defmodule JSON.LD.Framing do
           top_level_has_graph =
             is_map(state.original_frame) and Map.has_key?(state.original_frame, @graph)
 
-          # Determine whether to preserve or merge
-          cond do
-            # Property frame explicitly requests @graph preservation
-            is_map(frame) and Map.has_key?(frame, @graph) ->
-              graph_nodes = Map.values(named_graph)
-              %{@id => referenced_id, @graph => graph_nodes}
+          # Determine whether to preserve or merge (no state changes for named graphs)
+          result =
+            cond do
+              # Property frame explicitly requests @graph preservation
+              is_map(frame) and Map.has_key?(frame, @graph) ->
+                graph_nodes = Map.values(named_graph)
+                %{@id => referenced_id, @graph => graph_nodes}
 
-            # Mergeable and frame doesn't explicitly prevent merging
-            mergeable ->
-              # Return the merged node directly (already flattened with properties)
-              Map.get(named_graph, referenced_id)
+              # Mergeable and frame doesn't explicitly prevent merging
+              mergeable ->
+                # Return the merged node directly (already flattened with properties)
+                Map.get(named_graph, referenced_id)
 
-            # Top-level frame has @graph - preserve structure by default
-            top_level_has_graph ->
-              graph_nodes = Map.values(named_graph)
-              %{@id => referenced_id, @graph => graph_nodes}
+              # Top-level frame has @graph - preserve structure by default
+              top_level_has_graph ->
+                graph_nodes = Map.values(named_graph)
+                %{@id => referenced_id, @graph => graph_nodes}
 
-            # Otherwise, just return a reference (merge into default graph)
-            true ->
-              %{@id => referenced_id}
-          end
+              # Otherwise, just return a reference (merge into default graph)
+              true ->
+                %{@id => referenced_id}
+            end
+
+          {result, state}
         else
           # Regular node reference - embed or reference
           # Per JSON-LD Framing spec: determine how to frame the embedded node
@@ -1246,7 +1293,7 @@ defmodule JSON.LD.Framing do
 
       # Other value - pass through
       true ->
-        value
+        {value, state}
     end
   end
 
