@@ -582,7 +582,9 @@ defmodule JSON.LD.Compaction do
                       end
 
                     # 12.8.8.3)
-                    "@graph" in container and simple_graph?(expanded_item) ->
+                    # When @container: "@graph" (without @id or @index), merge the graph
+                    # even if it has an @id (e.g., from a blank node assigned during flattening)
+                    "@graph" in container and "@id" not in container and "@index" not in container ->
                       # 12.8.8.3.1)
                       compacted_item =
                         if is_list(compacted_item) and length(compacted_item) > 1,
@@ -1355,13 +1357,13 @@ defmodule JSON.LD.Compaction do
           cond do
             # Custom: If frame has @embed: @always for this property, OR if frame is explicitly
             # defined for this property (non-nil), keep full object.
-            # This allows framing to control embedding even with @type: @id in context
-            frame != nil && (has_always_embed_in_frame?(frame, active_property) || is_map(frame)) ->
+            # This allows framing to control embedding when explicitly requested via @embed: @always
+            frame != nil && has_always_embed_in_frame?(frame, active_property) ->
               if System.get_env("DEBUG_FRAMING") != nil do
                 IO.puts "=== EMBED CHECK TRIGGERED ==="
                 IO.puts "Property: #{active_property}"
                 IO.puts "Value @id: #{id}"
-                IO.puts "Frame is map: #{is_map(frame)}"
+                IO.puts "Frame requests @embed: @always"
                 IO.puts "========================"
               end
               value
