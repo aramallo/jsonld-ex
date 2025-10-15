@@ -236,7 +236,7 @@ defmodule JSON.LD.Framing do
           state
         end
 
-      {included_node_ids, state} =
+      {_included_node_ids, state} =
         if Map.has_key?(frame_obj, @included) do
           included_frames = List.wrap(frame_obj[@included])
 
@@ -1177,8 +1177,8 @@ defmodule JSON.LD.Framing do
     output =
       if Map.has_key?(node, @id) do
         node_id = Map.get(node, @id)
-        is_blank_node = is_binary(node_id) and String.starts_with?(node_id, "_:")
-        frame_requests_id = Map.has_key?(frame, @id)
+        _is_blank_node = is_binary(node_id) and String.starts_with?(node_id, "_:")
+        _frame_requests_id = Map.has_key?(frame, @id)
 
         # Always include @id when present
         # Blank nodes that appear only once will have @id removed during pruning step
@@ -2069,7 +2069,7 @@ defmodule JSON.LD.Framing do
   # Process a value (node reference or value object)
   # Memory-efficient: avoids creating intermediate structures
   # Returns: {processed_value, updated_state}
-  defp process_value(state, value, frame, parent, property \\ nil) do
+  defp process_value(state, value, frame, parent, property) do
     cond do
       # List object
       # Normative: @list processing
@@ -2284,28 +2284,6 @@ defmodule JSON.LD.Framing do
   end
 
   defp has_default_value?(_), do: false
-
-  # Check if a value references a specific node ID
-  defp is_reference_to?(value, target_id) when is_list(value) do
-    Enum.any?(value, &is_reference_to?(&1, target_id))
-  end
-
-  defp is_reference_to?(value, target_id) when is_map(value) do
-    Map.get(value, @id) == target_id
-  end
-
-  defp is_reference_to?(_, _), do: false
-
-  # Check if a @type value references a specific node ID
-  defp is_type_reference?(types, target_id) when is_list(types) do
-    target_id in types
-  end
-
-  defp is_type_reference?(type, target_id) when is_binary(type) do
-    type == target_id
-  end
-
-  defp is_type_reference?(_, _), do: false
 
   # Get a frame flag value with fallback to state default
   # Normative: Frame flag extraction
@@ -2559,7 +2537,7 @@ defmodule JSON.LD.Framing do
     # Step 2: Identify blank node IDs to clear (appear only once)
     bnodes_to_clear =
       bnode_counts
-      |> Enum.filter(fn {id, count} -> count == 1 end)
+      |> Enum.filter(fn {_id, count} -> count == 1 end)
       |> Enum.map(fn {id, _} -> id end)
       |> MapSet.new()
 
