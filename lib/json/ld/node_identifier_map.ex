@@ -33,9 +33,9 @@ defmodule JSON.LD.NodeIdentifierMap do
 
   def new() do
     tab = get_table()
-    prefix = make_ref()
-    :ets.insert(tab, {{prefix, :__counter__}, 0})
-    struct!(__MODULE__, tab: tab, ref: prefix)
+    ref = make_ref()
+    :ets.insert(tab, {{ref, :__counter__}, 0})
+    struct!(__MODULE__, tab: tab, ref: ref)
   end
 
   @doc """
@@ -71,12 +71,6 @@ defmodule JSON.LD.NodeIdentifierMap do
       [{{^ref, ^identifier}, blank_node_id}] ->
         blank_node_id
     end
-  end
-
-  defp blank_node_id(tab, ref) do
-    # Atomically increment and get the counter from ETS
-    counter = :ets.update_counter(tab, {ref, :__counter__}, 1)
-    "_:b#{counter - 1}"
   end
 
   # ================================================================================================
@@ -120,16 +114,24 @@ defmodule JSON.LD.NodeIdentifierMap do
   """
   @spec get_table(pid()) :: :ets.tid()
 
-  def get_table(pid \\ self()) when is_pid(pid) do
+  defp get_table(pid \\ self()) when is_pid(pid) do
     %{tables: tables} = :persistent_term.get(@tables_key)
     n = tuple_size(tables)
     idx = :erlang.phash2(pid, n) + 1
     elem(tables, idx - 1)
   end
 
-  @doc "Returns the list (tuple) of table ids."
-  def tables do
-    %{tables: tables} = :persistent_term.get(@tables_key)
-    tables
+  defp init_counter(tab, ref) do
+    :ets.insert(tab, {{ref, :__counter__}, 0})
+  end
+
+  defp incr_counter(tab, ref) do
+    :ets.update_counter(tab, {ref, :__counter__}, 1)
+  end
+
+  defp blank_node_id(tab, ref) do
+    # Atomically increment and get the counter from ETS
+    counter = incr_counter(tab, ref)
+    "_:b#{counter - 1}"
   end
 end
