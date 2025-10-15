@@ -28,6 +28,13 @@ defmodule JSON.LD.Compaction do
   # 3) If element is an array
   def compact(element, active_context, active_property, options, compact_arrays, ordered, frame, node_map)
       when is_list(element) do
+    if System.get_env("DEBUG_COMPACT") do
+      IO.puts("\n=== COMPACTING ARRAY ===")
+      IO.puts("element: #{inspect(element, limit: 3)}")
+      IO.puts("element == []: #{element == []}")
+      IO.puts("active_property: #{inspect(active_property)}")
+    end
+
     # 3.1) and 3.2)
     result =
       Enum.flat_map(element, fn item ->
@@ -41,26 +48,58 @@ defmodule JSON.LD.Compaction do
     term_def = active_context.term_defs[active_property]
     container_mapping = List.wrap(term_def && term_def.container_mapping)
 
+    if System.get_env("DEBUG_COMPACT") do
+      IO.puts("\n=== EMPTY ARRAY CHECK ===")
+      IO.puts("result: #{inspect(result)}")
+      IO.puts("result == []: #{result == []}")
+      IO.puts("active_property: #{inspect(active_property)}")
+      IO.puts("processing_mode: #{inspect(options.processing_mode)}")
+      IO.puts("container_mapping: #{inspect(container_mapping)}")
+      IO.puts("compact_arrays: #{inspect(compact_arrays)}")
+    end
+
     cond do
-      # If result is empty and there's no container, compact to nil
-      # Normative: Empty arrays without @container should compact to null
-      result == [] and active_property not in ~w[@graph @set] and
+      # If result is empty and there's no container, compact to nil in JSON-LD 1.0 ONLY
+      # Normative: In JSON-LD 1.0, empty arrays without @container compact to null
+      # But in JSON-LD 1.1 (non-framing), empty arrays are PRESERVED
+      # See: https://w3c.github.io/json-ld-api/ - "do not drop empty arrays"
+      result == [] and options.processing_mode != "json-ld-1.1" and
+        active_property not in ~w[@graph @set] and
         "@list" not in container_mapping and "@set" not in container_mapping ->
+        if System.get_env("DEBUG_COMPACT") do
+          IO.puts("→ Converting to nil (JSON-LD 1.0 mode)")
+        end
         nil
+
+      # In JSON-LD 1.1 (non-framing), preserve empty arrays (don't unwrap them)
+      # Normative: JSON-LD 1.1 spec says "do not drop empty arrays"
+      # But framing has special rules, so only preserve when frame is nil
+      result == [] and options.processing_mode == "json-ld-1.1" and is_nil(frame) ->
+        if System.get_env("DEBUG_COMPACT") do
+          IO.puts("→ Preserving empty array (JSON-LD 1.1 non-framing mode)")
+        end
+        []
 
       # Don't unwrap single-element arrays if compact_arrays is false or for special properties
       not compact_arrays or
         active_property in ~w[@graph @set] or
         "@list" in container_mapping or
           "@set" in container_mapping ->
+        if System.get_env("DEBUG_COMPACT") do
+          IO.puts("→ Keeping as array (no unwrapping)")
+        end
         result
 
       # Unwrap single-element arrays
       true ->
-        case result do
+        result_value = case result do
           [value] -> value
           result -> result
         end
+        if System.get_env("DEBUG_COMPACT") do
+          IO.puts("→ Unwrapping: #{inspect(result)} => #{inspect(result_value)}")
+        end
+        result_value
     end
   end
 
@@ -344,13 +383,17 @@ defmodule JSON.LD.Compaction do
             term_def = active_context.term_defs[item_active_property]
 
             # Determine the value to use: nil if no special container, [] otherwise
-            # Normative: Empty arrays without @container should compact to null
-            # Exception: @graph should preserve empty arrays
+            # Normative:
+            # - JSON-LD 1.0: Empty arrays without @container compact to null
+            # - JSON-LD 1.1 (non-framing): Empty arrays are PRESERVED
+            # - Framing: Uses special rules (nil for omitDefault)
+            # Exception: @graph and containers with @list/@set always preserve empty arrays
             container_mapping = List.wrap(term_def && term_def.container_mapping)
 
             compacted_empty_value =
               if "@list" in container_mapping or "@set" in container_mapping or
-                   item_active_property == "@graph" do
+                   item_active_property == "@graph" or
+                   (options.processing_mode == "json-ld-1.1" and is_nil(frame)) do
                 []
               else
                 nil
@@ -462,10 +505,15 @@ defmodule JSON.LD.Compaction do
                 # 12.8.7)
                 list?(expanded_item) ->
                   # 12.8.7.1)
+                  # SPEC CLARIFICATION: When compacting an empty @list, the recursive compaction
+                  # returns nil. But for @list objects, we should preserve the empty array []
+                  # instead of wrapping nil as [nil]
                   compacted_item =
-                    if not is_list(compacted_item),
-                      do: [compacted_item],
-                      else: compacted_item
+                    cond do
+                      is_list(compacted_item) -> compacted_item
+                      is_nil(compacted_item) and expanded_item["@list"] == [] -> []
+                      true -> [compacted_item]
+                    end
 
                   # 12.8.7.2)
                   if "@list" not in container do
@@ -582,9 +630,10 @@ defmodule JSON.LD.Compaction do
                       end
 
                     # 12.8.8.3)
-                    # When @container: "@graph" (without @id or @index), merge the graph
-                    # even if it has an @id (e.g., from a blank node assigned during flattening)
-                    "@graph" in container and "@id" not in container and "@index" not in container ->
+                    # When @container: "@graph" (without @id or @index), only compact simple graphs (without @id).
+                    # Per spec: "Graph compaction works only on simple graphs"
+                    "@graph" in container and "@id" not in container and "@index" not in container and
+                        simple_graph?(expanded_item) ->
                       # 12.8.8.3.1)
                       compacted_item =
                         if is_list(compacted_item) and length(compacted_item) > 1,
@@ -845,6 +894,18 @@ defmodule JSON.LD.Compaction do
       end
 
     Map.update(map, key, default_value, fn
+      # Don't append nil values to existing lists (nil represents empty/null)
+      old_value when is_list(old_value) and is_nil(value) ->
+        if System.get_env("DEBUG_MERGE"), do: IO.puts("  merge: skip nil append to list")
+        old_value
+      # Replace nil with non-nil value (don't create [nil, value])
+      old_value when is_nil(old_value) and not is_nil(value) ->
+        if System.get_env("DEBUG_MERGE"), do: IO.puts("  merge: replace nil with #{inspect(value, limit: 2)}, as_array=#{as_array}")
+        if(as_array and not is_list(value), do: [value], else: value)
+      # Both nil: remain nil
+      old_value when is_nil(old_value) and is_nil(value) ->
+        if System.get_env("DEBUG_MERGE"), do: IO.puts("  merge: both nil")
+        nil
       old_value when is_list(old_value) and is_list(value) -> old_value ++ value
       old_value when is_list(old_value) -> old_value ++ [value]
       old_value when is_list(value) -> [old_value | value]

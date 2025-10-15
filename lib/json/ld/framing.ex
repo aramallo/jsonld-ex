@@ -168,25 +168,53 @@ defmodule JSON.LD.Framing do
         frame_context: frame_context
       }
 
-      # Step 6: Extract root frame object
+      # Step 6: Extract root frame object(s)
       # Normative: https://www.w3.org/TR/json-ld11-framing/#framing-algorithm Step 6
       # When @graph is empty, extract other properties (for "frame the default graph" pattern)
-      frame_obj =
+      # When @graph contains multiple frame objects, keep ALL of them for multi-frame matching
+      # Note: After expansion, @graph with multiple frames becomes a flat list: [frame_a, frame_b]
+      {frame_obj, frame_objects} =
         case expanded_frame do
-          # Non-empty @graph in list - extract frame from inside @graph
-          [%{@graph => [graph_frame | _]} | _] -> graph_frame
+          # List of multiple frame objects (expanded from @graph array) - multi-frame case
+          frames when is_list(frames) and length(frames) > 1 ->
+            # Check if these are all frame objects (maps without @graph key)
+            all_frames = Enum.all?(frames, &(is_map(&1) and not Map.has_key?(&1, @graph)))
+
+            if all_frames do
+              # Multi-frame case: use all frames
+              {List.first(frames), frames}
+            else
+              # Has @graph wrapper, extract it
+              case frames do
+                [%{@graph => graph_frames} | _] when is_list(graph_frames) and graph_frames != [] ->
+                  {List.first(graph_frames), graph_frames}
+                [frame | _] ->
+                  {frame, [frame]}
+              end
+            end
+          # Single frame with @graph
+          [%{@graph => graph_frames} | _] when is_list(graph_frames) and graph_frames != [] ->
+            {List.first(graph_frames), graph_frames}
           # Empty @graph in list - remove @graph, keep other properties
-          [%{@graph => []} = frame | _] -> Map.delete(frame, @graph)
-          # No @graph in list - use the whole frame object
-          [frame_obj | _] -> frame_obj
-          # Non-empty @graph as map - extract frame from inside @graph
-          %{@graph => [graph_frame | _]} -> graph_frame
+          [%{@graph => []} = frame | _] ->
+            frame_without_graph = Map.delete(frame, @graph)
+            {frame_without_graph, [frame_without_graph]}
+          # Single frame object in list
+          [frame_obj | _] when is_map(frame_obj) ->
+            {frame_obj, [frame_obj]}
+          # Non-empty @graph as map - extract frame(s) from inside @graph
+          %{@graph => graph_frames} when is_list(graph_frames) and graph_frames != [] ->
+            {List.first(graph_frames), graph_frames}
           # Empty @graph as map - remove @graph, keep other properties
-          %{@graph => []} = frame -> Map.delete(frame, @graph)
+          %{@graph => []} = frame ->
+            frame_without_graph = Map.delete(frame, @graph)
+            {frame_without_graph, [frame_without_graph]}
           # Plain map - use as-is
-          frame_obj when is_map(frame_obj) -> frame_obj
+          frame_obj when is_map(frame_obj) ->
+            {frame_obj, [frame_obj]}
           # Default - empty frame
-          _ -> %{}
+          _ ->
+            {%{}, [%{}]}
         end
 
       # Step 6.3: Merge framing keywords from original frame
@@ -208,7 +236,10 @@ defmodule JSON.LD.Framing do
       end
 
       # Add root frame to state for use when embedding referenced nodes
-      state = Map.put(state, :root_frame, frame_obj)
+      # Also add all frame objects for multi-frame matching support
+      state = state
+        |> Map.put(:root_frame, frame_obj)
+        |> Map.put(:frame_objects, frame_objects)
 
       # Step 6.5: Pre-identify nodes matching @included frame
       # This allows us to avoid embedding them in properties (they should be references)
@@ -516,6 +547,30 @@ defmodule JSON.LD.Framing do
   """
   @spec match_frame(map, [String.t()], map, String.t() | nil) :: {[map], map}
   def match_frame(state, subjects, frame, parent) do
+    # Check if we have multiple frame objects (multi-frame matching)
+    frame_objects = Map.get(state, :frame_objects, [frame])
+
+    if System.get_env("DEBUG_FRAMING") do
+      IO.puts("\n=== MATCH_FRAME ===")
+      IO.puts("Number of frame_objects: #{length(frame_objects)}")
+      IO.puts("Number of subjects: #{length(subjects)}")
+      if length(frame_objects) > 1 do
+        Enum.with_index(frame_objects, fn frame_obj, idx ->
+          IO.puts("Frame #{idx}: #{inspect(Map.keys(frame_obj))}")
+        end)
+      end
+    end
+
+    # For multi-frame support: match each subject against all frames, use first match
+    if length(frame_objects) > 1 do
+      match_frame_multi(state, subjects, frame_objects, parent)
+    else
+      match_frame_single(state, subjects, frame, parent)
+    end
+  end
+
+  # Single frame matching (original behavior)
+  defp match_frame_single(state, subjects, frame, parent) do
     # Create cache key for this frame matching operation
     frame_key = :erlang.phash2(frame)
 
@@ -546,6 +601,54 @@ defmodule JSON.LD.Framing do
       # Nested: Thread state across siblings to maintain @once semantics within tree
       matched_subjects
       |> Enum.map_reduce(state, fn id, acc_state ->
+        case embed_node(acc_state, id, frame, parent) do
+          {nil, new_state} -> {[], new_state}
+          {node, new_state} -> {[node], new_state}
+        end
+      end)
+      |> then(fn {nested_nodes, final_state} ->
+        {List.flatten(nested_nodes), final_state}
+      end)
+    end
+  end
+
+  # Multi-frame matching: match each subject against all frames, use first match
+  defp match_frame_multi(state, subjects, frame_objects, parent) do
+    # For each subject, find the first matching frame
+    subject_frame_pairs =
+      subjects
+      |> Enum.map(fn id ->
+        # Find first frame that matches this subject
+        matching_frame = Enum.find(frame_objects, fn frame ->
+          frame_key = :erlang.phash2(frame)
+          filter_subjects_cached(state, id, frame, frame_key)
+        end)
+
+        {id, matching_frame}
+      end)
+      # Filter out subjects that don't match any frame
+      |> Enum.filter(fn {_id, frame} -> frame != nil end)
+
+    # Embed each matched subject with its specific frame
+    if parent == nil do
+      # Top-level: Independent embedding context for each tree
+      {nodes, _final_state} =
+        subject_frame_pairs
+        |> Enum.map_reduce(state, fn {id, frame}, _acc_state ->
+          # Reset embedded map for each top-level tree
+          fresh_state = %{state | embedded: %{}}
+
+          case embed_node(fresh_state, id, frame, parent) do
+            {nil, _} -> {[], state}
+            {node, _} -> {[node], state}
+          end
+        end)
+
+      {List.flatten(nodes), state}
+    else
+      # Nested: Thread state across siblings
+      subject_frame_pairs
+      |> Enum.map_reduce(state, fn {id, frame}, acc_state ->
         case embed_node(acc_state, id, frame, parent) do
           {nil, new_state} -> {[], new_state}
           {node, new_state} -> {[node], new_state}
