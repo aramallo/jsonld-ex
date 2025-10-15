@@ -97,12 +97,22 @@ defmodule JSON.LD.Framing do
       node_map = Flattening.generate_node_map(expanded_input, %{@default => %{}}, node_id_map)
 
       # Determine which graph to frame
-      # If input has both @id and @graph, it's a named graph
+      # If input is a SINGLE named graph (one element with @id and @graph), frame that graph
+      # If input has MULTIPLE named graphs or other patterns, frame from @default
+      # Normative: JSON-LD 1.1 Framing - multiple named graphs are merged when framing from default
       current_graph =
         case expanded_input do
-          [%{@id => graph_id, @graph => _} | _] when is_binary(graph_id) -> graph_id
+          # Single named graph - frame that specific graph
+          [%{@id => graph_id, @graph => _}] when is_binary(graph_id) -> graph_id
+          # Multiple elements or other patterns - frame from @default (with merging)
           _ -> @default
         end
+
+      if System.get_env("DEBUG_FRAMING") != nil do
+        IO.puts("\n=== CURRENT GRAPH ===")
+        IO.puts("current_graph: #{inspect(current_graph)}")
+        IO.puts("expanded_input length: #{inspect(length(List.wrap(expanded_input)))}")
+      end
 
       # Step 5: Initialize framing state
       # Normative: https://www.w3.org/TR/json-ld11-framing/#framing-algorithm Step 5
@@ -203,7 +213,28 @@ defmodule JSON.LD.Framing do
       # Step 6.5: Pre-identify nodes matching @included frame
       # This allows us to avoid embedding them in properties (they should be references)
       # Normative: Nodes in @included should not be deeply embedded
-      graph_to_frame = node_map[current_graph] || %{}
+      #
+      # When framing from @default graph, merge nodes from all named graphs
+      # Normative: JSON-LD 1.1 Framing spec - nodes with same @id across multiple
+      # graphs should be merged when framing
+      graph_to_frame =
+        if current_graph == @default do
+          # Merge nodes from all graphs into default graph
+          merge_graphs_for_framing(node_map)
+        else
+          node_map[current_graph] || %{}
+        end
+
+      # Update state.graph_map with merged nodes so get_node() can find them
+      # This is critical for the framing algorithm to retrieve merged nodes
+      state =
+        if current_graph == @default and graph_to_frame != node_map[@default] do
+          Map.update!(state, :graph_map, fn gm ->
+            Map.put(gm, @default, graph_to_frame)
+          end)
+        else
+          state
+        end
 
       {included_node_ids, state} =
         if Map.has_key?(frame_obj, @included) do
@@ -1059,13 +1090,39 @@ defmodule JSON.LD.Framing do
           end
           {%{@id => id}, state}
 
-        # @last: replace previous embedding (not fully implemented - requires backtracking)
-        # For now, treat as @once for memory efficiency (but NOT for top-level matches)
-        embedded_node != nil and embed_value == :last and not is_top_level_match ->
-          if System.get_env("DEBUG_FRAMING") != nil and (String.contains?(to_string(id), "column_of") or String.contains?(to_string(id), "BoardColumn")) do
-            IO.puts("    -> Returning reference (@last)")
+        # @last: only embed fully if this is the LAST property embedding this node
+        # Check last_embed_map to see if current property is the last one
+        # Check this EVEN on first embedding, to determine if we should defer to a later property
+        embed_value == :last and not is_top_level_match ->
+          last_embed_map = Map.get(state, :last_embed_map, %{})
+          last_property = Map.get(last_embed_map, id)
+          current_property = Map.get(state, :current_property)
+          is_last_embedding = last_property == current_property
+
+          if System.get_env("DEBUG_FRAMING") != nil do
+            IO.puts("    @last logic for #{id}:")
+            IO.puts("      last_property: #{inspect(last_property)}")
+            IO.puts("      current_property: #{inspect(current_property)}")
+            IO.puts("      is_last_embedding: #{is_last_embedding}")
+            IO.puts("      embedded_node: #{inspect(embedded_node != nil)}")
           end
-          {%{@id => id}, state}
+
+          if is_last_embedding or last_property == nil do
+            # This IS the last property - embed fully (fall through to embedding below)
+            # Add to subject stack for circular reference detection
+            state = %{state | subject_stack: [id | state.subject_stack]}
+            {output, final_state} = create_output_node(state, node, frame, id)
+            final_state = put_in(final_state.embedded[id], output)
+            final_state = %{final_state | subject_stack: List.delete(final_state.subject_stack, id)}
+            {output, final_state}
+          else
+            # Not the last property - return reference only
+            if System.get_env("DEBUG_FRAMING") != nil do
+              IO.puts("    -> Returning reference (@last, not last property)")
+            end
+
+            {%{@id => id}, state}
+          end
 
         # Embed the node
         # Normative: @embed: @always or first embedding with @once or top-level match
@@ -1196,6 +1253,19 @@ defmodule JSON.LD.Framing do
         Enum.uniq(node_props ++ frame_props)
       end
 
+    # Pre-scan properties to determine which property is the "last" one to embed each node with @embed: @last
+    # Normative: @embed: @last means only the last property embedding a node should have full embedding
+    last_embed_map = build_last_embed_map(properties, node, frame)
+
+    if System.get_env("DEBUG_FRAMING") != nil and map_size(last_embed_map) > 0 do
+      IO.puts("\n=== LAST_EMBED_MAP for node #{id} ===")
+      IO.inspect(last_embed_map)
+    end
+
+    # Merge with existing last_embed_map to preserve parent's mappings
+    existing_map = Map.get(state, :last_embed_map, %{})
+    state = Map.put(state, :last_embed_map, Map.merge(existing_map, last_embed_map))
+
     # Process properties and add to output with state threading
     # Use streaming to minimize memory usage
     {output, state_after_props} =
@@ -1255,6 +1325,91 @@ defmodule JSON.LD.Framing do
     end
 
     {output, final_state}
+  end
+
+  # Build map of node_id => property_name for @embed: @last
+  # Returns a map where each node ID maps to the LAST property that embeds it with @last
+  defp build_last_embed_map(properties, node, frame) do
+    # Get inherited @embed value from frame root
+    # Normative: Properties inherit @embed from parent frame unless overridden
+    frame_embed_value = Map.get(frame, "@embed")
+    frame_embed_option =
+      cond do
+        frame_embed_value in ["@last", "@Last", "last", :last] -> :last
+        frame_embed_value in ["@always", "always", :always] -> :always
+        frame_embed_value in ["@never", "never", :never] -> :never
+        true -> nil  # No inherited value
+      end
+
+    if System.get_env("DEBUG_FRAMING") != nil and frame_embed_option != nil do
+      IO.puts("  Frame-level @embed: #{inspect(frame_embed_option)}")
+    end
+
+    properties
+    |> Enum.reduce(%{}, fn property, acc ->
+      # Skip keywords
+      if property in @excluded_from_properties do
+        acc
+      else
+        # Check if this property exists in node
+        if Map.has_key?(node, property) do
+          # Get property-specific frame (if it exists)
+          property_frame =
+            if Map.has_key?(frame, property) do
+              case Map.get(frame, property) do
+                [first | _] when is_map(first) -> first
+                val when is_map(val) -> val
+                _ -> %{}
+              end
+            else
+              %{}
+            end
+
+          # Extract @embed value - property-specific overrides frame-level
+          property_embed_value = Map.get(property_frame, "@embed")
+          embed_option =
+            cond do
+              # Property has explicit @embed
+              property_embed_value in ["@last", "@Last", "last", :last] -> :last
+              property_embed_value in ["@always", "always", :always] -> :always
+              property_embed_value in ["@never", "never", :never] -> :never
+              property_embed_value != nil -> :once  # Explicit but not recognized
+              # Inherit from frame
+              frame_embed_option != nil -> frame_embed_option
+              # Default
+              true -> :once
+            end
+
+          if System.get_env("DEBUG_FRAMING") != nil do
+            IO.puts("  Property #{property}: embed_option=#{inspect(embed_option)}, property @embed=#{inspect(property_embed_value)}, inherited=#{inspect(frame_embed_option)}")
+          end
+
+          if embed_option == :last do
+            # Get node IDs that this property would embed
+            property_values = node[property] |> List.wrap()
+
+            property_values
+            |> Enum.reduce(acc, fn value, acc2 ->
+              if is_map(value) and Map.has_key?(value, @id) do
+                # This property embeds this node ID with @last
+                # Since we process properties in order, this overwrites earlier properties
+                if System.get_env("DEBUG_FRAMING") != nil do
+                  IO.puts("    Tracking @last for node #{value[@id]} via property #{property}")
+                end
+
+                Map.put(acc2, value[@id], property)
+              else
+                acc2
+              end
+            end)
+          else
+            acc
+          end
+        else
+          acc
+        end
+      end
+    end)
   end
 
   # Add a single property to the output
@@ -1400,7 +1555,9 @@ defmodule JSON.LD.Framing do
         {processed_values, final_state} =
           filtered_values
           |> Enum.map_reduce(state, fn value, acc_state ->
-            process_value(acc_state, value, property_frame, parent_id, property)
+            # Track current property in state for @embed: @last logic
+            acc_state_with_property = Map.put(acc_state, :current_property, property)
+            process_value(acc_state_with_property, value, property_frame, parent_id, property)
           end)
 
         {Map.put(output, property, processed_values), final_state}
@@ -2188,6 +2345,90 @@ defmodule JSON.LD.Framing do
     do: if(value, do: :once, else: :never)
 
   defp normalize_flag_value(_flag, _value, default), do: default
+
+  # Merge nodes from all graphs for framing
+  # When framing from @default, we need to see nodes from ALL graphs
+  # and merge properties for nodes with the same @id
+  # Normative: JSON-LD 1.1 Framing - cross-graph node merging
+  defp merge_graphs_for_framing(node_map) do
+    # Start with nodes from @default graph
+    default_nodes = node_map[@default] || %{}
+
+    if System.get_env("DEBUG_FRAMING") != nil do
+      IO.puts("\n=== MERGING GRAPHS FOR FRAMING ===")
+      IO.puts("Available graphs: #{inspect(Map.keys(node_map))}")
+      IO.puts("Default graph nodes: #{inspect(Map.keys(default_nodes))}")
+    end
+
+    # Get all named graphs (exclude @default)
+    named_graphs = node_map
+      |> Map.delete(@default)
+      |> Map.values()
+
+    # Merge nodes from all named graphs
+    result = Enum.reduce(named_graphs, default_nodes, fn graph_nodes, acc ->
+      Enum.reduce(graph_nodes, acc, fn {node_id, node}, acc ->
+        if Map.has_key?(acc, node_id) do
+          # Node already exists - merge properties
+          if System.get_env("DEBUG_FRAMING") != nil do
+            IO.puts("Merging existing node: #{node_id}")
+          end
+          Map.update!(acc, node_id, fn existing_node ->
+            merge_node_properties(existing_node, node)
+          end)
+        else
+          # New node - add it
+          if System.get_env("DEBUG_FRAMING") != nil do
+            IO.puts("Adding new node: #{node_id}")
+          end
+          Map.put(acc, node_id, node)
+        end
+      end)
+    end)
+
+    if System.get_env("DEBUG_FRAMING") != nil do
+      IO.puts("Merged graph nodes: #{inspect(Map.keys(result))}")
+      for {id, node} <- result do
+        if not String.contains?(id, "#graph") do
+          IO.puts("\n  Merged node #{id}:")
+          IO.inspect(node, pretty: true, limit: :infinity)
+        end
+      end
+    end
+
+    result
+  end
+
+  # Merge properties from two nodes with the same @id
+  # Arrays are concatenated and deduplicated
+  # Non-array values from node2 take precedence
+  defp merge_node_properties(node1, node2) do
+    Map.merge(node1, node2, fn key, v1, v2 ->
+      cond do
+        # Special handling for @id - keep consistent
+        key == @id -> v1
+
+        # @type should be merged and deduplicated
+        key == @type ->
+          List.wrap(v1)
+          |> Kernel.++(List.wrap(v2))
+          |> Enum.uniq()
+
+        # For other properties, merge arrays
+        is_list(v1) and is_list(v2) ->
+          (v1 ++ v2) |> Enum.uniq()
+
+        is_list(v1) ->
+          (v1 ++ [v2]) |> Enum.uniq()
+
+        is_list(v2) ->
+          ([v1] ++ v2) |> Enum.uniq()
+
+        # Non-list values: v2 takes precedence
+        true -> v2
+      end
+    end)
+  end
 
   # Get a node from the graph map
   # Memory-efficient: direct map lookup, no copying
