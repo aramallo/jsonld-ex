@@ -11,6 +11,10 @@ defmodule JSON.LD.NodeIdentifierMap do
 
   use GenServer
 
+  # TODO add option to use the following options for counters:
+  # - System.unique_integer([monotonic, positive]) - the most scalable and concurrent, but shared, which might complicate matching bnodes when testing
+  # - :atomics - in most cases faster / more concurrent that ets counters
+  # - :ets (counters) - the current implementation
   defstruct [:tab, :ref]
 
   @type t :: %__MODULE__{tab: :ets.tid(), ref: reference()}
