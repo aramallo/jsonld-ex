@@ -426,18 +426,43 @@ defmodule JSON.LD.Framing do
       # Note: Empty frames {} should NOT unwrap
       frame_has_properties = map_size(frame_obj) > 0
 
-      # Check if frame has non-keyword properties besides @id
-      # Keywords to exclude when checking for "other properties"
+      # Check if frame has non-keyword properties with wildcard/node patterns
+      # Distinguish between:
+      # - Value patterns (literals, value objects) → used for filtering
+      # - Wildcard/node patterns (%{}, node objects) → used for node framing
+      # Only wildcard/node patterns count as "other properties" for unwrap decision
+      framing_keywords = [
+        @id,
+        @_type_,
+        @graph,
+        @context,
+        @embed,
+        @explicit,
+        @omitDefault,
+        @requireAll,
+        @reverse
+      ]
+
       frame_has_other_properties =
         frame_obj
-        |> Map.keys()
-        |> Enum.any?(&(&1 not in [@id, @_type_, @graph, @context]))
+        |> Enum.any?(fn {key, value} ->
+          key not in framing_keywords and is_wildcard_or_node_pattern?(value)
+        end)
 
-      # Check if frame @id is a wildcard (null, [], or empty map) vs a specific value selector
+      # Check if frame @id is a wildcard (null, [], %{}, or [%{}]) vs a specific value selector
       # When @id is a specific value/array, it's used for filtering, not unwrapping
       # UNLESS the frame has no other properties (just @id for node selection)
       frame_id = Map.get(frame_obj, @id)
-      is_id_wildcard = frame_id in [nil, [], %{}]
+
+      is_id_wildcard =
+        case frame_id do
+          nil -> true
+          [] -> true
+          %{} -> true
+          # Expanded form: [%{}] - array with single empty map wildcard
+          [single] when is_map(single) and map_size(single) == 0 -> true
+          _ -> false
+        end
 
       if System.get_env("DEBUG_UNWRAP") do
         IO.puts("\n=== UNWRAP DECISION ===")
@@ -2868,6 +2893,31 @@ defmodule JSON.LD.Framing do
       end)
     end
   end
+
+  # Check if a frame property value is a wildcard or node pattern
+  # Returns true for wildcards (%{}, [%{}]) or node objects (maps without @value)
+  # Returns false for value patterns (literals, value objects with @value)
+  defp is_wildcard_or_node_pattern?(value) when is_map(value) do
+    # Empty map is wildcard
+    if map_size(value) == 0 do
+      true
+    else
+      # Map with @value is a value pattern, not a node pattern
+      not Map.has_key?(value, @value)
+    end
+  end
+
+  defp is_wildcard_or_node_pattern?(value) when is_list(value) do
+    # Array with single empty map wildcard [%{}]
+    case value do
+      [single] when is_map(single) and map_size(single) == 0 -> true
+      # Other arrays: check if they contain wildcards/node patterns
+      _ -> Enum.any?(value, &is_wildcard_or_node_pattern?/1)
+    end
+  end
+
+  # Literals (strings, numbers, booleans) are value patterns
+  defp is_wildcard_or_node_pattern?(_value), do: false
 
   # Remove @preserve entries from the result
   # Normative: https://www.w3.org/TR/json-ld11-framing/#framing-algorithm Step 10
