@@ -1305,6 +1305,17 @@ defmodule JSON.LD.Compaction do
       # 9) To ensure that the IRI var is not confused with a compact IRI, if the IRI scheme of var matches any term in active context with prefix flag set to true, and var has no IRI authority (preceded by double-forward-slash (//), an IRI confused with prefix error has been detected, and processing is aborted.
       # Normative: Check that var has NO authority component (no "//") - this means it looks like a CURIE but isn't a proper IRI
       # IRIs with authority like "http://..." are safe and won't be confused with CURIEs
+      # Exception: Only raise error if the prefix is a known URI scheme (http, https, urn, ftp, etc.)
+      # Namespace prefixes (schema, ex, foaf, etc.) that are explicitly defined should allow CURIE expansion
+
+      # Known URI schemes that shouldn't be treated as CURIE prefixes
+      # Per IANA URI scheme registry: https://www.iana.org/assignments/uri-schemes/uri-schemes.xhtml
+      # These are absolute IRI schemes that, when defined as prefixes, create confusion
+      uri_schemes = ~w[
+        http https ftp ftps file mailto tel urn uuid data ws wss
+        about acct bitcoin dns geo im irc magnet sms ssh telnet
+        tag info ldap news nntp sip sips xmpp
+      ]
 
       if System.get_env("DEBUG_COMPACTION") do
         IO.puts("\n=== IRI CONFUSION CHECK ===")
@@ -1316,19 +1327,31 @@ defmodule JSON.LD.Compaction do
       Enum.each(active_context.term_defs, fn {term, term_def} ->
         if (term_def && term_def.prefix_flag) and String.starts_with?(var, "#{term}:") and
              not String.contains?(var, "//") do
-          # Additional check: if there's an exact term match, don't raise error
-          # This handles cases like "dcterms:creator" being both a term and looking like a CURIE
-          if active_context.term_defs[var] && active_context.term_defs[var].iri_mapping == var do
-            # This is an exact term match, not a confused prefix
-            if System.get_env("DEBUG_COMPACTION") do
-              IO.puts("✓ Found exact term match for #{var}, skipping error")
-            end
-            :ok
-          else
-            if System.get_env("DEBUG_COMPACTION") do
-              IO.puts("✗ No exact term match, raising error")
-            end
-            raise JSON.LD.Error.iri_confused_with_prefix(var, term)
+          # Check various conditions to determine if this is a confusion error
+          cond do
+            # Additional check: if there's an exact term match, don't raise error
+            # This handles cases like "dcterms:creator" being both a term and looking like a CURIE
+            active_context.term_defs[var] && active_context.term_defs[var].iri_mapping == var ->
+              # This is an exact term match, not a confused prefix
+              if System.get_env("DEBUG_COMPACTION") do
+                IO.puts("✓ Found exact term match for #{var}, skipping error")
+              end
+              :ok
+
+            # NEW: Only raise error if the prefix is a known URI scheme
+            # Namespace prefixes like "schema", "ex", "foaf" should be allowed for CURIE expansion
+            term in uri_schemes ->
+              if System.get_env("DEBUG_COMPACTION") do
+                IO.puts("✗ Prefix '#{term}' is a URI scheme, raising error")
+              end
+              raise JSON.LD.Error.iri_confused_with_prefix(var, term)
+
+            # Prefix is not a URI scheme, allow CURIE expansion
+            true ->
+              if System.get_env("DEBUG_COMPACTION") do
+                IO.puts("✓ Prefix '#{term}' is not a URI scheme, allowing CURIE: #{var}")
+              end
+              :ok
           end
         end
       end)

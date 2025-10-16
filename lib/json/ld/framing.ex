@@ -248,6 +248,17 @@ defmodule JSON.LD.Framing do
       # When framing from @default graph, merge nodes from all named graphs
       # Normative: JSON-LD 1.1 Framing spec - nodes with same @id across multiple
       # graphs should be merged when framing
+
+      if System.get_env("DEBUG_HUGE") do
+        all_graphs = Map.keys(node_map)
+        IO.puts("\n=== FRAMING GRAPH '#{current_graph}' ===")
+        IO.puts("Total graphs in node_map: #{length(all_graphs)}")
+        Enum.each(all_graphs, fn graph_id ->
+          node_count = map_size(Map.get(node_map, graph_id, %{}))
+          IO.puts("  Graph '#{graph_id}': #{node_count} nodes")
+        end)
+      end
+
       graph_to_frame =
         if current_graph == @default do
           # Merge nodes from all graphs into default graph
@@ -255,6 +266,10 @@ defmodule JSON.LD.Framing do
         else
           node_map[current_graph] || %{}
         end
+
+      if System.get_env("DEBUG_HUGE") do
+        IO.puts("Graph to frame (#{current_graph}): #{map_size(graph_to_frame)} nodes")
+      end
 
       # Update state.graph_map with merged nodes so get_node() can find them
       # This is critical for the framing algorithm to retrieve merged nodes
@@ -298,8 +313,11 @@ defmodule JSON.LD.Framing do
       # Normative: In JSON-LD 1.1, blank nodes that are embedded in other matched nodes
       # should not appear as separate top-level entries in @graph
       # In JSON-LD 1.0, all matched nodes appear at top-level (duplicates allowed)
+      # Exception: Empty/wildcard frames match all nodes at top-level (no filtering)
+      is_wildcard_frame = is_wildcard_frame?(frame_obj)
+
       filtered_matches =
-        if processor_options.processing_mode != "json-ld-1.0" and length(matches) > 1 do
+        if processor_options.processing_mode != "json-ld-1.0" and length(matches) > 1 and not is_wildcard_frame do
           # JSON-LD 1.1: Filter embedded blank nodes
           # Collect IDs of all nodes that are embedded within the matches
           embedded_ids =
@@ -313,7 +331,7 @@ defmodule JSON.LD.Framing do
             end)
 
           # Filter out blank nodes that are embedded in other matches
-          Enum.filter(matches, fn match ->
+          filtered = Enum.filter(matches, fn match ->
             match_id = Map.get(match, @id)
             is_blank = is_binary(match_id) and String.starts_with?(match_id, "_:")
 
@@ -322,6 +340,19 @@ defmodule JSON.LD.Framing do
             # 2. It's a blank node but not embedded in another match
             not is_blank or not MapSet.member?(embedded_ids, match_id)
           end)
+
+          if System.get_env("DEBUG_HUGE") do
+            filtered_count = length(filtered)
+            removed_count = length(matches) - filtered_count
+            if removed_count > 0 do
+              IO.puts("\n=== BLANK NODE FILTERING ===")
+              IO.puts("Matches before filtering: #{length(matches)}")
+              IO.puts("Matches after filtering: #{filtered_count}")
+              IO.puts("Removed #{removed_count} embedded blank nodes")
+            end
+          end
+
+          filtered
         else
           # JSON-LD 1.0 or single match: No filtering
           matches
@@ -394,10 +425,40 @@ defmodule JSON.LD.Framing do
       # and either frame explicitly has @id or frame has properties but not @graph, unwrap
       # Note: Empty frames {} should NOT unwrap
       frame_has_properties = map_size(frame_obj) > 0
+
+      # Check if frame has non-keyword properties besides @id
+      # Keywords to exclude when checking for "other properties"
+      frame_has_other_properties =
+        frame_obj
+        |> Map.keys()
+        |> Enum.any?(&(&1 not in [@id, @_type_, @graph, @context]))
+
+      # Check if frame @id is a wildcard (null, [], or empty map) vs a specific value selector
+      # When @id is a specific value/array, it's used for filtering, not unwrapping
+      # UNLESS the frame has no other properties (just @id for node selection)
+      frame_id = Map.get(frame_obj, @id)
+      is_id_wildcard = frame_id in [nil, [], %{}]
+
+      if System.get_env("DEBUG_UNWRAP") do
+        IO.puts("\n=== UNWRAP DECISION ===")
+        IO.puts("frame_obj @id: #{inspect(frame_id)}")
+        IO.puts("is_id_wildcard: #{is_id_wildcard}")
+        IO.puts("frame_has_properties: #{frame_has_properties}")
+        IO.puts("frame_has_other_properties: #{frame_has_other_properties}")
+        IO.puts("result @graph length: #{length(result[@graph] || [])}")
+      end
+
       result =
         if processor_options.processing_mode != "json-ld-1.0" and
              is_list(result[@graph]) and length(result[@graph]) == 1 and
-             (Map.has_key?(frame_obj, @id) or (frame_has_properties and not Map.has_key?(frame_obj, @graph))) do
+             not Map.has_key?(frame_obj, @graph) and
+             # Unwrap if:
+             # 1. @id is wildcard AND frame has @id
+             # 2. Frame has properties but NOT @id
+             # 3. Frame has ONLY @id (no other properties besides keywords) - node selector case
+             (is_id_wildcard and Map.has_key?(frame_obj, @id) or
+                (frame_has_properties and not Map.has_key?(frame_obj, @id)) or
+                (Map.has_key?(frame_obj, @id) and not frame_has_other_properties)) do
           unwrapped = List.first(result[@graph])
           # Preserve @included if present when unwrapping
           if Map.has_key?(result, @included) do
@@ -417,13 +478,16 @@ defmodule JSON.LD.Framing do
       # Based on jsonld.js implementation: remove @id from blank nodes used only once
       # This makes the output cleaner by only including @id when necessary for references
       # Normative: Only prune in json-ld-1.1 mode; json-ld-1.0 keeps all blank node IDs
+      #
+      # Pass frame context to pruning so it can avoid pruning blank nodes that are
+      # values of properties with @type: @id
       result =
         if processor_options.processing_mode == "json-ld-1.0" do
           # JSON-LD 1.0: Keep all blank node IDs
           result
         else
-          # JSON-LD 1.1: Prune blank nodes that appear only once
-          prune_blank_node_identifiers(result)
+          # JSON-LD 1.1: Prune blank nodes, but preserve those needed by @type: @id properties
+          prune_blank_node_identifiers(result, frame_context)
         end
 
       # Step 11: Compact the result
@@ -494,6 +558,24 @@ defmodule JSON.LD.Framing do
         IO.inspect(result, pretty: true, limit: :infinity)
       end
 
+      if System.get_env("DEBUG_HUGE") do
+        graph_nodes = if is_map(result) and Map.has_key?(result, "@graph"), do: result["@graph"], else: []
+        ids = Enum.map(graph_nodes, fn node -> Map.get(node, "@id") end) |> Enum.reject(&is_nil/1)
+        unique_ids = Enum.uniq(ids)
+        IO.puts("\n=== BEFORE COMPACTION ===")
+        IO.puts("@graph nodes: #{length(graph_nodes)}")
+        IO.puts("@graph @ids: #{length(ids)}")
+        IO.puts("Unique @ids: #{length(unique_ids)}")
+        if length(ids) != length(unique_ids) do
+          IO.puts("WARNING: Duplicate @ids before compaction!")
+        end
+      end
+
+      if System.get_env("DEBUG_T0010") do
+        IO.puts("\n=== BEFORE COMPACTION ===")
+        IO.inspect(result, pretty: true, limit: :infinity)
+      end
+
       compacted =
         Compaction.compact(
           result,
@@ -506,12 +588,50 @@ defmodule JSON.LD.Framing do
           node_map  # Pass node_map for computing reverse properties
         )
 
+      if System.get_env("DEBUG_T0010") do
+        IO.puts("\n=== AFTER COMPACTION ===")
+        IO.inspect(compacted, pretty: true, limit: :infinity)
+      end
+
+      if System.get_env("DEBUG_HUGE") do
+        graph_nodes = if is_map(compacted) and Map.has_key?(compacted, "@graph"), do: compacted["@graph"], else: []
+        ids = Enum.map(graph_nodes, fn node -> Map.get(node, "@id") end) |> Enum.reject(&is_nil/1)
+        unique_ids = Enum.uniq(ids)
+        IO.puts("\n=== AFTER COMPACTION ===")
+        IO.puts("@graph nodes: #{length(graph_nodes)}")
+        IO.puts("@graph @ids: #{length(ids)}")
+        IO.puts("Unique @ids: #{length(unique_ids)}")
+        if length(ids) != length(unique_ids) do
+          IO.puts("WARNING: Duplicate @ids after compaction!")
+          # Show which IDs are duplicated
+          id_counts = Enum.reduce(ids, %{}, fn id, acc -> Map.update(acc, id, 1, &(&1 + 1)) end)
+          duplicates = Enum.filter(id_counts, fn {_id, count} -> count > 1 end) |> Enum.sort_by(fn {_id, count} -> -count end)
+          IO.puts("\nTop 10 duplicated IDs:")
+          Enum.take(duplicates, 10) |> Enum.each(fn {id, count} -> IO.puts("  #{id}: #{count} times") end)
+        end
+      end
+
       # Step 12: Add @context to result
       # Normative: https://www.w3.org/TR/json-ld11-framing/#framing-algorithm Step 12
-      case frame do
+      final_result = case frame do
         %{@context => context} -> Map.put(compacted, @context, context)
         _ -> compacted
       end
+
+      if System.get_env("DEBUG_HUGE") do
+        graph_nodes = if is_map(final_result) and Map.has_key?(final_result, "@graph"), do: final_result["@graph"], else: []
+        ids = Enum.map(graph_nodes, fn node -> Map.get(node, "@id") end) |> Enum.reject(&is_nil/1)
+        unique_ids = Enum.uniq(ids)
+        IO.puts("\n=== FINAL RESULT (with context) ===")
+        IO.puts("@graph nodes: #{length(graph_nodes)}")
+        IO.puts("@graph @ids: #{length(ids)}")
+        IO.puts("Unique @ids: #{length(unique_ids)}")
+        if length(ids) != length(unique_ids) do
+          IO.puts("WARNING: Duplicate @ids in final result!")
+        end
+      end
+
+      final_result
     after
       # Clean up node ID map to free memory
       NodeIdentifierMap.delete(node_id_map)
@@ -579,6 +699,19 @@ defmodule JSON.LD.Framing do
       # Filter subjects that match the frame (with caching)
       |> Enum.filter(fn id -> filter_subjects_cached(state, id, frame, frame_key) end)
 
+    if parent == nil and System.get_env("DEBUG_HUGE") do
+      IO.puts("\n=== MATCH_FRAME_SINGLE (TOP-LEVEL) ===")
+      IO.puts("Total subjects: #{length(subjects)}")
+      IO.puts("Matched subjects: #{length(matched_subjects)}")
+      # Check for duplicates
+      unique_matched = Enum.uniq(matched_subjects)
+      if length(unique_matched) != length(matched_subjects) do
+        IO.puts("WARNING: Duplicate matched subjects!")
+        IO.puts("  Unique: #{length(unique_matched)}")
+        IO.puts("  Total: #{length(matched_subjects)}")
+      end
+    end
+
     # Embed each matched subject
     # For top-level matches (parent == nil), each gets independent embedding context
     # For nested matches (parent != nil), thread state across siblings
@@ -596,7 +729,23 @@ defmodule JSON.LD.Framing do
           end
         end)
 
-      {List.flatten(nodes), state}
+      flattened = List.flatten(nodes)
+
+      if System.get_env("DEBUG_HUGE") do
+        IO.puts("\n=== MATCH_FRAME_SINGLE RESULT ===")
+        IO.puts("Nodes before flatten: #{length(nodes)}")
+        IO.puts("Nodes after flatten: #{length(flattened)}")
+        # Check for duplicate @ids in result
+        ids = Enum.map(flattened, fn node -> Map.get(node, "@id") end) |> Enum.reject(&is_nil/1)
+        unique_ids = Enum.uniq(ids)
+        if length(unique_ids) != length(ids) do
+          IO.puts("WARNING: Duplicate @ids in flattened result!")
+          IO.puts("  Unique @ids: #{length(unique_ids)}")
+          IO.puts("  Total @ids: #{length(ids)}")
+        end
+      end
+
+      {flattened, state}
     else
       # Nested: Thread state across siblings to maintain @once semantics within tree
       matched_subjects
@@ -700,6 +849,14 @@ defmodule JSON.LD.Framing do
   end
 
   defp only_framing_keywords?(_), do: false
+
+  # Check if frame is a wildcard (empty or only framing keywords)
+  # Wildcard frames match all nodes and don't filter embedded blank nodes
+  defp is_wildcard_frame?(frame) when is_map(frame) do
+    Enum.empty?(frame) or only_framing_keywords?(frame)
+  end
+
+  defp is_wildcard_frame?(_), do: false
 
   # Match a node against a frame
   # Normative: https://www.w3.org/TR/json-ld11-framing/#frame-matching Step 3.2-3.4
@@ -1268,6 +1425,14 @@ defmodule JSON.LD.Framing do
   # Create the output node by processing properties
   # Normative: Node object creation with property filtering
   defp create_output_node(state, node, frame, id) do
+    if System.get_env("DEBUG_T0010") do
+      if is_binary(id) and String.contains?(id, "asset") do
+        IO.puts("\n=== CREATE_OUTPUT_NODE for #{id} ===")
+        IO.puts("Node keys: #{inspect(Map.keys(node))}")
+        IO.puts("Frame keys: #{inspect(Map.keys(frame))}")
+      end
+    end
+
     # Get framing flags
     # Normative: @explicit flag processing
     explicit = get_frame_flag(frame, @explicit, state.explicit_inclusion)
@@ -1703,9 +1868,17 @@ defmodule JSON.LD.Framing do
               {Map.put(output, property, List.wrap(default_value)), state}
             end
           else
-            # No @default - add empty array (will compact to null)
-            # Per spec: properties in frame but not in node should be null if no @default
-            {Map.put(output, property, []), state}
+            # No @default - check if this property already exists in output under a different IRI
+            # This can happen when input and frame contexts have different mappings for the same property
+            # (e.g., "dcterms:creator" as absolute IRI vs "http://purl.org/dc/terms/creator" as expanded IRI)
+            # Skip adding empty array if property already exists in output
+            if property_already_in_output?(output, property) do
+              {output, state}
+            else
+              # No @default - add empty array (will compact to null)
+              # Per spec: properties in frame but not in node should be null if no @default
+              {Map.put(output, property, []), state}
+            end
           end
         end
 
@@ -1713,6 +1886,32 @@ defmodule JSON.LD.Framing do
       true ->
         {output, state}
     end
+  end
+
+  # Check if a property (by IRI) might already exist in output under a different form
+  # This handles CURIE conflicts where the same property has different IRI representations
+  # For example: "dcterms:creator" (absolute IRI) vs "http://purl.org/dc/terms/creator" (expanded)
+  defp property_already_in_output?(output, property) do
+    # Extract local name from the property IRI (part after last / or # or :)
+    property_local_name =
+      property
+      |> String.split(~r{[/#:]})
+      |> List.last()
+      |> String.downcase()
+
+    # Check if any existing output property has the same local name
+    output
+    |> Map.keys()
+    |> Enum.filter(&(not String.starts_with?(&1, "@")))  # Skip keywords
+    |> Enum.any?(fn existing_prop ->
+      existing_local_name =
+        existing_prop
+        |> String.split(~r{[/#:]})
+        |> List.last()
+        |> String.downcase()
+
+      existing_local_name == property_local_name
+    end)
   end
 
   # Add @reverse relationships to output
@@ -2265,7 +2464,9 @@ defmodule JSON.LD.Framing do
             root_nodes = Enum.reject(graph_nodes, fn node -> MapSet.member?(referenced_ids, node[@id]) end)
 
             # Switch to the named graph context for framing
-            state_in_graph = %{state | current_graph: referenced_id}
+            # Reset embedded map so embeddings inside unnamed graph don't affect parent level
+            # Normative: Each graph context should have independent @embed: @once tracking
+            state_in_graph = %{state | current_graph: referenced_id, embedded: %{}}
             # Frame only root nodes
             {framed_nodes, final_state} =
               root_nodes
@@ -2274,38 +2475,95 @@ defmodule JSON.LD.Framing do
                 # Parent is the graph container itself (referenced_id)
                 embed_node(acc_state, node[@id], frame, referenced_id)
               end)
-            # Restore the original graph context
-            final_state = %{final_state | current_graph: state.current_graph}
+            # Restore the original graph context and embedded map
+            # Normative: Embeddings inside unnamed graph should not affect parent
+            final_state = %{final_state | current_graph: state.current_graph, embedded: state.embedded}
             # Filter out any nil results
             framed_nodes = Enum.reject(framed_nodes, &is_nil/1)
             # Return the framed nodes with @graph wrapper
             # The @id and @graph will be processed during compaction
             {%{@id => referenced_id, @graph => framed_nodes}, final_state}
           else
-            # Other cases don't update state
-            result =
-              cond do
-                # Property frame explicitly requests @graph preservation
-                is_map(frame) and Map.has_key?(frame, @graph) ->
-                  graph_nodes = Map.values(named_graph)
-                  %{@id => referenced_id, @graph => graph_nodes}
+            # Other cases may or may not update state
+            cond do
+              # Property frame explicitly requests @graph preservation with specific frame
+              # Normative: Frame the named graph contents using the @graph value as the frame
+              is_map(frame) and Map.has_key?(frame, @graph) ->
+                # Extract the @graph frame value
+                # In expanded form, this may be a list or a map
+                graph_frame =
+                  case frame[@graph] do
+                    # Expanded form: list of frame objects
+                    [frame_obj | _] when is_map(frame_obj) -> frame_obj
+                    # Compact form: single frame object
+                    frame_obj when is_map(frame_obj) -> frame_obj
+                    # Fallback: use empty frame
+                    _ -> %{}
+                  end
 
-                # Mergeable and frame doesn't explicitly prevent merging
-                mergeable ->
-                  # Return the merged node directly (already flattened with properties)
-                  Map.get(named_graph, referenced_id)
+                graph_nodes = Map.values(named_graph)
 
-                # Top-level frame has @graph - preserve structure by default
-                top_level_has_graph ->
-                  graph_nodes = Map.values(named_graph)
-                  %{@id => referenced_id, @graph => graph_nodes}
+                # Find root nodes (not referenced by others within this graph)
+                referenced_ids =
+                  graph_nodes
+                  |> Enum.flat_map(fn node ->
+                    node
+                    |> Enum.flat_map(fn {key, value} ->
+                      if key not in [@id, @_type_] do
+                        List.wrap(value)
+                        |> Enum.flat_map(fn v ->
+                          cond do
+                            is_map(v) and Map.has_key?(v, @id) -> [v[@id]]
+                            true -> []
+                          end
+                        end)
+                      else
+                        []
+                      end
+                    end)
+                  end)
+                  |> MapSet.new()
 
-                # Otherwise, just return a reference (merge into default graph)
-                true ->
-                  %{@id => referenced_id}
-              end
+                # Root nodes are those not referenced by others in this graph
+                root_nodes = Enum.reject(graph_nodes, fn node -> MapSet.member?(referenced_ids, node[@id]) end)
 
-            {result, state}
+                # Switch to the named graph context for framing
+                # Reset embedded map so embeddings inside unnamed graph don't affect parent level
+                # Normative: Each graph context should have independent @embed: @once tracking
+                state_in_graph = %{state | current_graph: referenced_id, embedded: %{}}
+
+                # Frame root nodes using the @graph frame
+                {framed_nodes, final_state} =
+                  root_nodes
+                  |> Enum.map_reduce(state_in_graph, fn node, acc_state ->
+                    # Use the @graph value as the frame for this node
+                    embed_node(acc_state, node[@id], graph_frame, referenced_id)
+                  end)
+
+                # Restore the original graph context and embedded map
+                # Normative: Embeddings inside unnamed graph should not affect parent
+                final_state = %{final_state | current_graph: state.current_graph, embedded: state.embedded}
+
+                # Filter out any nil results
+                framed_nodes = Enum.reject(framed_nodes, &is_nil/1)
+
+                # Return the framed nodes with @graph wrapper
+                {%{@id => referenced_id, @graph => framed_nodes}, final_state}
+
+              # Mergeable and frame doesn't explicitly prevent merging
+              mergeable ->
+                # Return the merged node directly (already flattened with properties)
+                {Map.get(named_graph, referenced_id), state}
+
+              # Top-level frame has @graph - preserve structure by default
+              top_level_has_graph ->
+                graph_nodes = Map.values(named_graph)
+                {%{@id => referenced_id, @graph => graph_nodes}, state}
+
+              # Otherwise, just return a reference (merge into default graph)
+              true ->
+                {%{@id => referenced_id}, state}
+            end
           end
         else
           # Regular node reference - embed or reference
@@ -2409,6 +2667,12 @@ defmodule JSON.LD.Framing do
     value
   end
 
+  # Boolean flags can also be strings "true" or "false"
+  defp normalize_flag_value(flag, value, _default)
+       when flag in [@explicit, @omitDefault, @requireAll] and value in ["true", "false"] do
+    value == "true"
+  end
+
   # @embed flag with keyword values
   defp normalize_flag_value(@embed, value, _default) when value in [true, @always, "always", :always],
     do: :always
@@ -2441,12 +2705,15 @@ defmodule JSON.LD.Framing do
       IO.puts("Default graph nodes: #{inspect(Map.keys(default_nodes))}")
     end
 
-    # Get all named graphs (exclude @default)
+    # Get all named graphs (exclude @default and unnamed blank node graphs)
+    # Normative: Blank node graphs should not be merged with default graph
+    # Only named graphs (with IRI identifiers) should be merged
     named_graphs = node_map
       |> Map.delete(@default)
-      |> Map.values()
+      |> Enum.reject(fn {graph_id, _} -> String.starts_with?(graph_id, "_:") end)
+      |> Enum.map(fn {_, graph_nodes} -> graph_nodes end)
 
-    # Merge nodes from all named graphs
+    # Merge nodes from all named graphs (excluding blank node graphs)
     result = Enum.reduce(named_graphs, default_nodes, fn graph_nodes, acc ->
       Enum.reduce(graph_nodes, acc, fn {node_id, node}, acc ->
         if Map.has_key?(acc, node_id) do
@@ -2632,15 +2899,23 @@ defmodule JSON.LD.Framing do
   # Based on jsonld.js pruneBlankNodeIdentifiers feature
   # Removes @id from blank nodes that are only referenced once
   # This makes the output cleaner by only including @id when necessary for references
-  @spec prune_blank_node_identifiers(any) :: any
-  defp prune_blank_node_identifiers(value) do
+  @spec prune_blank_node_identifiers(any, map() | nil) :: any
+  defp prune_blank_node_identifiers(value, context \\ nil) do
     # Step 1: Scan the framed result and count blank node ID occurrences
     bnode_counts = count_blank_node_ids(value, %{})
 
-    # Step 2: Identify blank node IDs to clear (appear only once)
+    # Step 2: Get properties with @type: @id from context (these need to preserve blank node IDs)
+    id_properties = get_id_properties_from_context(context)
+
+    # Step 3: Identify blank node IDs to clear (appear only once AND not needed by @type: @id properties)
     bnodes_to_clear =
       bnode_counts
       |> Enum.filter(fn {_id, count} -> count == 1 end)
+      |> Enum.reject(fn {id, _} ->
+        # Don't prune if this blank node is the @id of an object that's a value
+        # of a property with @type: @id (compaction needs the @id in this case)
+        blank_node_needed_by_id_property?(id, value, id_properties)
+      end)
       |> Enum.map(fn {id, _} -> id end)
       |> MapSet.new()
 
@@ -2649,29 +2924,23 @@ defmodule JSON.LD.Framing do
       Enum.each(bnode_counts, fn {id, count} ->
         IO.puts("  #{id}: #{count} occurrences")
       end)
+      IO.puts("Properties with @type: @id: #{inspect(MapSet.to_list(id_properties))}")
+
+      if MapSet.size(id_properties) > 0 do
+        IO.puts("Value structure: #{inspect(value, limit: 10, pretty: true)}")
+      end
+
       IO.puts("Bnodes to clear: #{inspect(MapSet.to_list(bnodes_to_clear))}")
     end
 
-    # Step 3: Recursively remove @id from nodes with blank node IDs in bnodes_to_clear
+    # Step 4: Recursively remove @id from nodes with blank node IDs in bnodes_to_clear
     prune_ids(value, bnodes_to_clear)
   end
 
   # Count blank node ID occurrences in the framed result
+  # Normative: Count both @id properties and string value references (e.g., in @type)
   defp count_blank_node_ids(value, counts) when is_map(value) do
-    # If this node has a blank node @id, increment its count
-    counts =
-      if Map.has_key?(value, @id) do
-        id_value = value[@id]
-        if is_binary(id_value) and String.starts_with?(id_value, "_:") do
-          Map.update(counts, id_value, 1, &(&1 + 1))
-        else
-          counts
-        end
-      else
-        counts
-      end
-
-    # Recursively count in nested values
+    # Recursively count in all values (including @id, @type, and other properties)
     Enum.reduce(value, counts, fn {_key, val}, acc ->
       count_blank_node_ids(val, acc)
     end)
@@ -2681,6 +2950,16 @@ defmodule JSON.LD.Framing do
     Enum.reduce(value, counts, fn item, acc ->
       count_blank_node_ids(item, acc)
     end)
+  end
+
+  # Count string values that are blank node IDs (e.g., "@type": "_:b0")
+  # This includes @id values, @type values, and any other blank node references
+  defp count_blank_node_ids(value, counts) when is_binary(value) do
+    if String.starts_with?(value, "_:") do
+      Map.update(counts, value, 1, &(&1 + 1))
+    else
+      counts
+    end
   end
 
   defp count_blank_node_ids(_value, counts), do: counts
@@ -2734,4 +3013,76 @@ defmodule JSON.LD.Framing do
   end
 
   defp prune_ids(value, _bnodes_to_clear), do: value
+
+  # Extract properties that have @type: @id from context
+  # These properties require their values to preserve @id even for blank nodes
+  defp get_id_properties_from_context(nil), do: MapSet.new()
+
+  defp get_id_properties_from_context(%Context{term_defs: term_defs}) do
+    term_defs
+    |> Enum.filter(fn {_key, term_def} ->
+      # Check if term definition has type_mapping set to "@id"
+      term_def.type_mapping == @id
+    end)
+    |> Enum.flat_map(fn {key, term_def} ->
+      # Include both the term itself and its iri_mapping
+      iri_mapping = term_def.iri_mapping
+
+      if iri_mapping && is_binary(iri_mapping) do
+        [key, iri_mapping]
+      else
+        [key]
+      end
+    end)
+    |> MapSet.new()
+  end
+
+  defp get_id_properties_from_context(_), do: MapSet.new()
+
+  # Check if a blank node ID is needed because it's the @id of an object
+  # that is a value of a property with @type: @id
+  defp blank_node_needed_by_id_property?(_blank_node_id, _value, id_properties)
+       when map_size(id_properties) == 0 do
+    false
+  end
+
+  defp blank_node_needed_by_id_property?(blank_node_id, value, id_properties) do
+    result = check_blank_node_in_value(blank_node_id, value, id_properties, nil)
+
+    if System.get_env("DEBUG_BLANK_NODES") != nil and MapSet.size(id_properties) > 0 do
+      IO.puts("  Checking if #{blank_node_id} needed: #{result}")
+    end
+
+    result
+  end
+
+  # Recursively check if blank_node_id appears as @id of object that's value of an @type: @id property
+  defp check_blank_node_in_value(blank_node_id, value, id_properties, parent_property)
+       when is_map(value) do
+    # Check if this object has the blank node as @id and parent property has @type: @id
+    is_match =
+      Map.get(value, @id) == blank_node_id and parent_property != nil and
+        MapSet.member?(id_properties, parent_property)
+
+    if is_match do
+      true
+    else
+      # Recursively check in nested structures, tracking the property name
+      Enum.any?(value, fn {key, val} ->
+        check_blank_node_in_value(blank_node_id, val, id_properties, key)
+      end)
+    end
+  end
+
+  defp check_blank_node_in_value(blank_node_id, value, id_properties, parent_property)
+       when is_list(value) do
+    # When recursing into array values, PRESERVE the parent_property
+    # because the array items are still values of that property
+    Enum.any?(value, fn item ->
+      check_blank_node_in_value(blank_node_id, item, id_properties, parent_property)
+    end)
+  end
+
+  defp check_blank_node_in_value(_blank_node_id, _value, _id_properties, _parent_property),
+    do: false
 end
