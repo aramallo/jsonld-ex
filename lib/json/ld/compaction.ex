@@ -1466,6 +1466,10 @@ defmodule JSON.LD.Compaction do
       IO.puts("Value keys: #{inspect(Map.keys(value))}")
       IO.puts("Value: #{inspect(value, limit: 5)}")
       IO.puts("Frame: #{inspect(frame, limit: 3)}")
+      IO.puts("term_def: #{inspect(term_def != nil)}")
+      if term_def do
+        IO.puts("term_def.type_mapping: #{inspect(term_def.type_mapping)}")
+      end
     end
 
     result =
@@ -1596,6 +1600,22 @@ defmodule JSON.LD.Compaction do
       end
     end)
   end
+
+  # Helper function to check if the frame itself has @embed: @always
+  # If the frame has @embed: @always, we should embed all values
+  defp frame_has_always_embed?(frame) when is_map(frame) do
+    frame["@embed"] in ["@always", true]
+  end
+
+  defp frame_has_always_embed?(_frame), do: false
+
+  # Helper function to check if a property is explicitly mentioned in the frame
+  # If a property is in the frame, it means we want to frame/embed it
+  defp property_in_frame?(frame, property) when is_map(frame) do
+    Map.has_key?(frame, property)
+  end
+
+  defp property_in_frame?(_frame, _property), do: false
 
   # Helper function to check if a property in the frame has @embed: @always
   # This allows framing to control embedding even when context has @type: @id

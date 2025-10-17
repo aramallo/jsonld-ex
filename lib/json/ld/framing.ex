@@ -375,7 +375,9 @@ defmodule JSON.LD.Framing do
 
       # Step 8: Create result with @graph
       # Normative: https://www.w3.org/TR/json-ld11-framing/#framing-algorithm Step 8
-      result = %{@graph => filtered_matches}
+      # Sort nodes: nodes without @id first, then nodes with @id sorted alphabetically
+      sorted_matches = sort_graph_nodes(filtered_matches)
+      result = %{@graph => sorted_matches}
 
       # Step 8.5: Process @included if present in frame
       # Normative: https://www.w3.org/TR/json-ld11-framing/#framing-algorithm
@@ -3153,6 +3155,73 @@ defmodule JSON.LD.Framing do
   end
 
   defp remove_preserve(value), do: value
+
+  # Sort nodes in @graph array
+  # Nodes without @id come first (in original order), followed by nodes with @id sorted alphabetically
+  # Also sorts arrays within nodes by @id for consistent output
+  @spec sort_graph_nodes(list()) :: list()
+  defp sort_graph_nodes(nodes) when is_list(nodes) do
+    {nodes_without_id, nodes_with_id} =
+      Enum.split_with(nodes, fn node ->
+        is_map(node) and not Map.has_key?(node, @id)
+      end)
+
+    sorted_with_id =
+      nodes_with_id
+      |> Enum.sort_by(fn node ->
+        case Map.get(node, @id) do
+          id when is_binary(id) -> id
+          _ -> ""
+        end
+      end)
+      |> Enum.map(&sort_node_properties/1)
+
+    # Also sort properties in nodes without @id
+    sorted_without_id = Enum.map(nodes_without_id, &sort_node_properties/1)
+
+    sorted_without_id ++ sorted_with_id
+  end
+
+  defp sort_graph_nodes(value), do: value
+
+  # Sort array properties within a node by @id for consistent output
+  @spec sort_node_properties(map()) :: map()
+  defp sort_node_properties(node) when is_map(node) do
+    Map.new(node, fn {key, value} ->
+      {key, sort_property_value(value)}
+    end)
+  end
+
+  defp sort_node_properties(value), do: value
+
+  # Sort array values that contain objects with @id
+  @spec sort_property_value(any()) :: any()
+  defp sort_property_value(list) when is_list(list) do
+    # Check if this is a list of objects with @id
+    if Enum.all?(list, &(is_map(&1) and Map.has_key?(&1, @id))) do
+      # Sort by @id, then recursively sort nested properties
+      list
+      |> Enum.sort_by(fn item ->
+        case Map.get(item, @id) do
+          id when is_binary(id) -> id
+          _ -> ""
+        end
+      end)
+      |> Enum.map(&sort_node_properties/1)
+    else
+      # Recursively sort nested structures
+      Enum.map(list, &sort_property_value/1)
+    end
+  end
+
+  defp sort_property_value(map) when is_map(map) do
+    # Recursively sort properties in nested maps
+    Map.new(map, fn {key, value} ->
+      {key, sort_property_value(value)}
+    end)
+  end
+
+  defp sort_property_value(value), do: value
 
   # Prune blank node identifiers that appear only once
   # Based on jsonld.js pruneBlankNodeIdentifiers feature
