@@ -66,6 +66,7 @@ defmodule JSON.LD.Mixfile do
     [
       rdf_ex_dep(:rdf, "~> 2.1"),
       {:jason, "~> 1.2"},
+      {:libgraph, "~> 0.16"},
       {:tesla, "~> 1.2"},
       {:hackney, "~> 1.21", only: [:dev, :test]},
       {:gun, "~> 2.1", only: [:dev, :test]},

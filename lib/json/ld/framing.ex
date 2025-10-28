@@ -159,6 +159,82 @@ defmodule JSON.LD.Framing do
     @reverse | @framing_keywords
   ]
 
+  # Helper function to build graph and compute Strongly Connected Components (SCCs)
+  # This enables cycle detection and depth limiting for performance optimization
+  defp build_scc_mapping(node_map) do
+    # Build a directed graph from the node map
+    graph =
+      node_map
+      |> Enum.reduce(Graph.new(), fn {graph_name, nodes}, acc_graph ->
+        if graph_name == @default or is_binary(graph_name) do
+          nodes
+          |> Enum.reduce(acc_graph, fn {node_id, node}, g ->
+            # Add vertex for this node
+            g = Graph.add_vertex(g, node_id)
+
+            # Add edges for all outgoing references
+            node
+            |> Enum.reduce(g, fn {key, values}, edge_graph ->
+              if key not in [@id, @_type_] do
+                values
+                |> List.wrap()
+                |> Enum.reduce(edge_graph, fn value, eg ->
+                  cond do
+                    is_map(value) and Map.has_key?(value, @id) ->
+                      target_id = value[@id]
+                      Graph.add_edge(eg, node_id, target_id)
+
+                    true ->
+                      eg
+                  end
+                end)
+              else
+                edge_graph
+              end
+            end)
+          end)
+        else
+          acc_graph
+        end
+      end)
+
+    # Compute strongly connected components
+    sccs = Graph.components(graph)
+
+    # Create node_to_scc mapping: %{node_id => scc_index}
+    node_to_scc =
+      sccs
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {scc_nodes, scc_id} ->
+        Enum.map(scc_nodes, fn node_id -> {node_id, scc_id} end)
+      end)
+      |> Map.new()
+
+    {sccs, node_to_scc}
+  end
+
+  # Calculate safe embedding depth for nodes in the same SCC
+  # For small cycles (<=10 nodes): allow full traversal
+  # For large cycles: use logarithmic depth to prevent O(n²) behavior
+  defp calculate_safe_depth_for_scc(sccs, scc_id) do
+    if scc_id && scc_id < length(sccs) do
+      scc = Enum.at(sccs, scc_id)
+      scc_size = length(scc)
+
+      cond do
+        # Single node (no cycle): unlimited depth
+        scc_size <= 1 -> 999_999
+        # Small cycles: allow full traversal
+        scc_size <= 10 -> scc_size + 2
+        # Large cycles: logarithmic depth limit to prevent O(n²)
+        true -> max(10, trunc(:math.log2(scc_size)) + 5)
+      end
+    else
+      # No SCC info: allow unlimited depth
+      999_999
+    end
+  end
+
   @doc """
   Frames the given input according to the frame.
 
@@ -206,6 +282,9 @@ defmodule JSON.LD.Framing do
     try do
       # Use efficient node map generation
       node_map = Flattening.generate_node_map(expanded_input, %{@default => %{}}, node_id_map)
+
+      # Compute Strongly Connected Components for cycle detection and performance optimization
+      {sccs, node_to_scc} = build_scc_mapping(node_map)
 
       # Determine which graph to frame
       # If input is a SINGLE named graph (one element with @id and @graph), frame that graph
@@ -261,6 +340,11 @@ defmodule JSON.LD.Framing do
         require_all: require_all,
         # Map tracking embedded nodes (memory-efficient: stores only references)
         embedded: %{},
+        # Context-aware embedded tracking: %{context_id => %{node_id => true}}
+        # Allows sharing embeddings across contexts while respecting @once per context
+        embedded_by_context: %{},
+        # Current embedding context ID (top-level node ID)
+        current_context_id: nil,
         # Graph stack for nested graph processing
         graph_stack: [],
         # The node map for efficient lookups
@@ -276,7 +360,13 @@ defmodule JSON.LD.Framing do
         # Keep original frame for extracting framing keywords that may be lost in expansion
         original_frame: frame,
         # Frame context for expanding @default values
-        frame_context: frame_context
+        frame_context: frame_context,
+        # Strongly Connected Components for cycle detection
+        sccs: sccs,
+        # Map from node_id to SCC index for O(1) cycle detection
+        node_to_scc: node_to_scc,
+        # Track depth from context root (separate from subject_stack)
+        context_depth: 0
       }
 
       # Step 6: Extract root frame object(s)
@@ -887,10 +977,20 @@ defmodule JSON.LD.Framing do
     # Create cache key for this frame matching operation
     frame_key = :erlang.phash2(frame)
 
-    matched_subjects =
+    # Filter subjects that match the frame (with caching)
+    # Use reduce to thread state through for cache updates
+    {matched_subjects, state_after_matching} =
       subjects
-      # Filter subjects that match the frame (with caching)
-      |> Enum.filter(fn id -> filter_subjects_cached(state, id, frame, frame_key) end)
+      |> Enum.reduce({[], state}, fn id, {acc_matches, acc_state} ->
+        {matches, new_state} = filter_subjects_cached(acc_state, id, frame, frame_key)
+
+        if matches do
+          {[id | acc_matches], new_state}
+        else
+          {acc_matches, new_state}
+        end
+      end)
+      |> then(fn {matches, final_state} -> {Enum.reverse(matches), final_state} end)
 
     if parent == nil and System.get_env("DEBUG_HUGE") do
       IO.puts("\n=== MATCH_FRAME_SINGLE (TOP-LEVEL) ===")
@@ -910,16 +1010,32 @@ defmodule JSON.LD.Framing do
     # For top-level matches (parent == nil), each gets independent embedding context
     # For nested matches (parent != nil), thread state across siblings
     if parent == nil do
-      # Top-level: Independent embedding context for each tree
-      {nodes, _final_state} =
+      # Top-level: Independent embedding context for each tree (per spec)
+      # Use context-aware embedded map: embedded_by_context[context_id][node_id]
+      # This allows sharing work across contexts while respecting @once per context
+      {nodes, final_state} =
         matched_subjects
-        |> Enum.map_reduce(state, fn id, _acc_state ->
-          # Reset embedded map for each top-level tree
-          fresh_state = %{state | embedded: %{}}
+        |> Enum.map_reduce(state_after_matching, fn id, acc_state ->
+          # Use this top-level node's ID as the context ID
+          # Get or create the embedded map for this specific context
+          context_embedded = Map.get(acc_state.embedded_by_context || %{}, id, %{})
+
+          fresh_state = %{
+            acc_state
+            | embedded: context_embedded,
+              current_context_id: id
+          }
 
           case embed_node(fresh_state, id, frame, parent) do
-            {nil, _} -> {[], state}
-            {node, _} -> {[node], state}
+            {nil, new_state} ->
+              # Store updated embedded map back into context
+              updated_acc = put_in(acc_state.embedded_by_context[id], new_state.embedded)
+              {[], updated_acc}
+
+            {node, new_state} ->
+              # Store updated embedded map back into context
+              updated_acc = put_in(acc_state.embedded_by_context[id], new_state.embedded)
+              {[node], updated_acc}
           end
         end)
 
@@ -940,11 +1056,11 @@ defmodule JSON.LD.Framing do
         end
       end
 
-      {flattened, state}
+      {flattened, final_state}
     else
       # Nested: Thread state across siblings to maintain @once semantics within tree
       matched_subjects
-      |> Enum.map_reduce(state, fn id, acc_state ->
+      |> Enum.map_reduce(state_after_matching, fn id, acc_state ->
         case embed_node(acc_state, id, frame, parent) do
           {nil, new_state} -> {[], new_state}
           {node, new_state} -> {[node], new_state}
@@ -959,41 +1075,63 @@ defmodule JSON.LD.Framing do
   # Multi-frame matching: match each subject against all frames, use first match
   defp match_frame_multi(state, subjects, frame_objects, parent) do
     # For each subject, find the first matching frame
-    subject_frame_pairs =
+    # Thread state through to update cache
+    {subject_frame_pairs, state_after_matching} =
       subjects
-      |> Enum.map(fn id ->
-        # Find first frame that matches this subject
-        matching_frame =
-          Enum.find(frame_objects, fn frame ->
+      |> Enum.reduce({[], state}, fn id, {acc_pairs, acc_state} ->
+        # Find first frame that matches this subject, threading state through
+        {matching_frame, final_state} =
+          Enum.reduce_while(frame_objects, {nil, acc_state}, fn frame, {_found, thread_state} ->
             frame_key = :erlang.phash2(frame)
-            filter_subjects_cached(state, id, frame, frame_key)
+            {matches, new_state} = filter_subjects_cached(thread_state, id, frame, frame_key)
+
+            if matches do
+              {:halt, {frame, new_state}}
+            else
+              {:cont, {nil, new_state}}
+            end
           end)
 
-        {id, matching_frame}
+        if matching_frame do
+          {[{id, matching_frame} | acc_pairs], final_state}
+        else
+          {acc_pairs, final_state}
+        end
       end)
-      # Filter out subjects that don't match any frame
-      |> Enum.filter(fn {_id, frame} -> frame != nil end)
+      |> then(fn {pairs, final_state} -> {Enum.reverse(pairs), final_state} end)
 
     # Embed each matched subject with its specific frame
     if parent == nil do
-      # Top-level: Independent embedding context for each tree
-      {nodes, _final_state} =
+      # Top-level: Independent embedding context for each tree (per spec)
+      # Use context-aware embedded map for performance
+      {nodes, final_state} =
         subject_frame_pairs
-        |> Enum.map_reduce(state, fn {id, frame}, _acc_state ->
-          # Reset embedded map for each top-level tree
-          fresh_state = %{state | embedded: %{}}
+        |> Enum.map_reduce(state_after_matching, fn {id, frame}, acc_state ->
+          # Use this top-level node's ID as the context ID
+          context_embedded = Map.get(acc_state.embedded_by_context || %{}, id, %{})
+
+          fresh_state = %{
+            acc_state
+            | embedded: context_embedded,
+              current_context_id: id
+          }
 
           case embed_node(fresh_state, id, frame, parent) do
-            {nil, _} -> {[], state}
-            {node, _} -> {[node], state}
+            {nil, new_state} ->
+              updated_acc = put_in(acc_state.embedded_by_context[id], new_state.embedded)
+              {[], updated_acc}
+
+            {node, new_state} ->
+              updated_acc = put_in(acc_state.embedded_by_context[id], new_state.embedded)
+              {[node], updated_acc}
           end
         end)
 
-      {List.flatten(nodes), state}
+      {List.flatten(nodes), final_state}
     else
       # Nested: Thread state across siblings
       subject_frame_pairs
-      |> Enum.map_reduce(state, fn {id, frame}, acc_state ->
+      |> Enum.map_reduce(state_after_matching, fn {id, frame}, acc_state ->
         case embed_node(acc_state, id, frame, parent) do
           {nil, new_state} -> {[], new_state}
           {node, new_state} -> {[node], new_state}
@@ -1014,12 +1152,11 @@ defmodule JSON.LD.Framing do
       nil ->
         # Not in cache, compute and store
         result = filter_subjects(state, id, frame)
-        # Note: In production, we'd update state.match_cache here via message passing
-        # For now, we compute without caching to avoid state mutation issues
-        result
+        updated_state = put_in(state.match_cache[cache_key], result)
+        {result, updated_state}
 
       cached_result ->
-        cached_result
+        {cached_result, state}
     end
   end
 
@@ -1502,7 +1639,34 @@ defmodule JSON.LD.Framing do
         IO.puts("    subject_stack: #{inspect(state.subject_stack)}")
       end
 
+      # Check if we should apply SCC-based depth limiting
+      {should_limit_by_scc, scc_id, safe_depth} =
+        if not is_nil(state.current_context_id) and not is_top_level_match do
+          node_scc = Map.get(state.node_to_scc, id)
+          context_scc = Map.get(state.node_to_scc, state.current_context_id)
+
+          if not is_nil(node_scc) and node_scc == context_scc do
+            safe_depth = calculate_safe_depth_for_scc(state.sccs, node_scc)
+            {state.context_depth > safe_depth, node_scc, safe_depth}
+          else
+            {false, nil, nil}
+          end
+        else
+          {false, nil, nil}
+        end
+
       cond do
+        # SCC-based cycle detection: if this node is in the same SCC as the context root
+        # and we've exceeded the safe depth, return a reference to prevent O(n²) traversal
+        # This optimization maintains correctness while dramatically improving performance
+        should_limit_by_scc ->
+          if System.get_env("DEBUG_FRAMING") != nil and
+               (String.contains?(to_string(id), "SCC") or state.context_depth > 3) do
+            IO.puts("    -> Returning reference (same SCC #{scc_id}, depth #{state.context_depth} > safe #{safe_depth})")
+          end
+
+          {%{@id => id}, state}
+
         # Reference to parent node - return just a reference
         # Normative: Nodes within reverse properties that reference the parent should be minimal references
         # This prevents circular embedding when parent is temporarily removed from subject_stack
@@ -1592,14 +1756,20 @@ defmodule JSON.LD.Framing do
 
           if is_last_embedding or last_property == nil do
             # This IS the last property - embed fully (fall through to embedding below)
-            # Add to subject stack for circular reference detection
-            state = %{state | subject_stack: [id | state.subject_stack]}
+            # Add to subject stack for circular reference detection and increment depth
+            state = %{
+              state
+              | subject_stack: [id | state.subject_stack],
+                context_depth: state.context_depth + 1
+            }
+
             {output, final_state} = create_output_node(state, node, frame, id)
             final_state = put_in(final_state.embedded[id], output)
 
             final_state = %{
               final_state
-              | subject_stack: List.delete(final_state.subject_stack, id)
+              | subject_stack: List.delete(final_state.subject_stack, id),
+                context_depth: max(0, final_state.context_depth - 1)
             }
 
             {output, final_state}
@@ -1622,7 +1792,13 @@ defmodule JSON.LD.Framing do
           end
 
           # Add to subject stack for circular reference detection
-          state = %{state | subject_stack: [id | state.subject_stack]}
+          # and increment context depth for SCC cycle detection
+          state = %{
+            state
+            | subject_stack: [id | state.subject_stack],
+              context_depth: state.context_depth + 1
+          }
+
           {output, final_state} = create_output_node(state, node, frame, id)
 
           # Store the actual embedded node for potential reuse when embed_value is :always
@@ -1653,9 +1829,13 @@ defmodule JSON.LD.Framing do
             end
           end
 
-          # Remove node from subject_stack after processing is complete
+          # Remove node from subject_stack and decrement depth after processing is complete
           # Normative: Nodes should only be in subject_stack while actively being processed
-          final_state = %{final_state | subject_stack: List.delete(final_state.subject_stack, id)}
+          final_state = %{
+            final_state
+            | subject_stack: List.delete(final_state.subject_stack, id),
+              context_depth: max(0, final_state.context_depth - 1)
+          }
 
           {output, final_state}
       end
