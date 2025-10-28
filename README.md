@@ -22,7 +22,7 @@ The API documentation can be found [here](https://hexdocs.pm/json_ld/). For a gu
 
 - fully conforming JSON-LD 1.1 API processor
 - JSON-LD reader/writer for [RDF.ex]
-- JSON-LD Framing support
+- JSON-LD Framing support with scoped contexts
 - customizable HTTP client for remote document loading
 - tests of the [JSON-LD test suite] (see [here](https://github.com/rdf-elixir/jsonld-ex/tree/master/earl_reports) for the EARL reports)
 
@@ -161,6 +161,70 @@ produces
   }
 }
 ```
+
+### Framing with Scoped Contexts
+
+JSON-LD 1.1 introduces scoped contexts, which allow you to define context rules that only apply within specific types or properties. This is particularly useful when different types in your data need different term mappings.
+
+```elixir
+input = Jason.decode! """
+{
+  "@context": {"ex": "http://example.org/"},
+  "@graph": [
+    {
+      "@id": "ex:alice",
+      "@type": "ex:Person",
+      "ex:name": "Alice",
+      "ex:email": "alice@example.org"
+    }
+  ]
+}
+"""
+
+# Frame with type-scoped context
+frame = Jason.decode! """
+{
+  "@context": {
+    "ex": "http://example.org/",
+    "Person": {
+      "@id": "ex:Person",
+      "@context": {
+        "name": "ex:name",
+        "contact": "ex:email"
+      }
+    }
+  },
+  "@type": "Person"
+}
+"""
+
+JSON.LD.frame(input, frame)
+```
+
+produces
+
+```elixir
+%{
+  "@context" => %{
+    "ex" => "http://example.org/",
+    "Person" => %{
+      "@id" => "ex:Person",
+      "@context" => %{
+        "name" => "ex:name",
+        "contact" => "ex:email"
+      }
+    }
+  },
+  "@id" => "ex:alice",
+  "@type" => "Person",
+  "name" => "Alice",
+  "contact" => "alice@example.org"
+}
+```
+
+The scoped context defined within the `Person` type definition applies when framing Person nodes, mapping `ex:email` to the `contact` term. You can control whether scoped contexts propagate to nested nodes using `@propagate: true` or `@propagate: false`.
+
+For more details, see the `JSON.LD.Framing` module documentation.
 
 ## RDF Reader and Writer
 

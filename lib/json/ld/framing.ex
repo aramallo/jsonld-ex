@@ -6,6 +6,117 @@ defmodule JSON.LD.Framing do
   specification with optimizations for large inputs through caching and memoization.
 
   See <https://www.w3.org/TR/json-ld11-framing/>
+
+  ## Scoped Contexts
+
+  JSON-LD 1.1 supports scoped contexts, which allow you to define context rules that
+  only apply within specific types or properties. This provides fine-grained control
+  over term definitions during framing and compaction.
+
+  ### Type-Scoped Contexts
+
+  Type-scoped contexts are defined within type definitions and apply when that type
+  is used:
+
+      input = %{
+        "@context" => %{"ex" => "http://example.org/"},
+        "@graph" => [
+          %{
+            "@id" => "ex:alice",
+            "@type" => "ex:Person",
+            "ex:name" => "Alice",
+            "ex:email" => "alice@example.org"
+          }
+        ]
+      }
+
+      frame = %{
+        "@context" => %{
+          "ex" => "http://example.org/",
+          "Person" => %{
+            "@id" => "ex:Person",
+            "@context" => %{
+              "name" => "ex:name",
+              "contact" => "ex:email"
+            }
+          }
+        },
+        "@type" => "Person"
+      }
+
+      JSON.LD.frame(input, frame)
+      # Returns:
+      # %{
+      #   "@context" => ...,
+      #   "@type" => "Person",
+      #   "name" => "Alice",
+      #   "contact" => "alice@example.org"
+      # }
+
+  ### Property-Scoped Contexts
+
+  Property-scoped contexts are defined within property definitions and apply when
+  that property is used:
+
+      frame = %{
+        "@context" => %{
+          "ex" => "http://example.org/",
+          "location" => %{
+            "@id" => "ex:location",
+            "@context" => %{
+              "latitude" => "ex:lat",
+              "longitude" => "ex:long"
+            }
+          }
+        },
+        "@type" => "Event",
+        "location" => %{}
+      }
+
+  ### Propagation Control
+
+  By default, type-scoped contexts do not propagate to nested nodes. You can control
+  this behavior with `@propagate`:
+
+      # @propagate: false (default for type-scoped contexts)
+      frame = %{
+        "@context" => %{
+          "ex" => "http://example.org/",
+          "Person" => %{
+            "@id" => "ex:Person",
+            "@context" => %{
+              "@propagate" => false,
+              "name" => "ex:name"
+            }
+          }
+        }
+      }
+
+      # @propagate: true (propagates to nested nodes)
+      frame = %{
+        "@context" => %{
+          "ex" => "http://example.org/",
+          "Person" => %{
+            "@id" => "ex:Person",
+            "@context" => %{
+              "@propagate" => true,
+              "name" => "ex:name"
+            }
+          }
+        }
+      }
+
+  ### Advanced Features
+
+  Scoped contexts support:
+
+  - **Null contexts** (`"@context" => nil`) - Reset to base context
+  - **Array contexts** - Merge multiple context sources
+  - **@vocab** - Define vocabulary within scope
+  - **@protected** - Prevent term redefinition
+  - **@container** modifications - Control array/set behavior
+
+  See the test suite in `test/unit/scoped_context_framing_test.exs` for more examples.
   """
 
   import JSON.LD.Utils
