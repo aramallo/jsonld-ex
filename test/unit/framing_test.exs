@@ -367,5 +367,108 @@ defmodule JSON.LD.FramingTest do
       result = JSON.LD.frame(input, frame)
       assert expected == result
     end
+
+    test "framing multilanguage labels preserves @value and @language" do
+      input = %{
+        "@context" => %{
+          "ex" => "http://example.org/vocab#",
+          "rdfs" => "http://www.w3.org/2000/01/rdf-schema#"
+        },
+        "@graph" => [
+          %{
+            "@id" => "http://example.org/resource1",
+            "@type" => "ex:Item",
+            "rdfs:label" => [
+              %{"@value" => "Hello", "@language" => "en"},
+              %{"@value" => "Hola", "@language" => "es"},
+              %{"@value" => "Bonjour", "@language" => "fr"}
+            ],
+            "ex:description" => [
+              %{"@value" => "An example item", "@language" => "en"},
+              %{"@value" => "Un artículo de ejemplo", "@language" => "es"}
+            ]
+          },
+          %{
+            "@id" => "http://example.org/resource2",
+            "@type" => "ex:Item",
+            "rdfs:label" => %{"@value" => "World", "@language" => "en"}
+          }
+        ]
+      }
+
+      frame = %{
+        "@context" => %{
+          "ex" => "http://example.org/vocab#",
+          "rdfs" => "http://www.w3.org/2000/01/rdf-schema#"
+        },
+        "@type" => "ex:Item"
+      }
+
+      result = JSON.LD.frame(input, frame)
+
+      # Result should be an array wrapped in @graph or unwrapped items
+      items =
+        if is_list(result["@graph"]) do
+          result["@graph"]
+        else
+          # Single item or multiple items
+          if is_list(result) do
+            result
+          else
+            [result]
+          end
+        end
+
+      # Find resource1 in the results
+      resource1 = Enum.find(items, fn item -> item["@id"] == "http://example.org/resource1" end)
+      assert resource1 != nil, "resource1 should be in framed output"
+
+      # Check that labels are preserved with @value and @language
+      labels = List.wrap(resource1["rdfs:label"])
+      assert length(labels) == 3, "Should have 3 language variants"
+
+      # Verify each label has both @value and @language
+      en_label = Enum.find(labels, fn l -> l["@language"] == "en" end)
+      assert en_label != nil, "English label should exist"
+      assert en_label["@value"] == "Hello", "English label @value should be 'Hello'"
+      assert Map.has_key?(en_label, "@language"), "English label should have @language"
+
+      es_label = Enum.find(labels, fn l -> l["@language"] == "es" end)
+      assert es_label != nil, "Spanish label should exist"
+      assert es_label["@value"] == "Hola", "Spanish label @value should be 'Hola'"
+      assert Map.has_key?(es_label, "@language"), "Spanish label should have @language"
+
+      fr_label = Enum.find(labels, fn l -> l["@language"] == "fr" end)
+      assert fr_label != nil, "French label should exist"
+      assert fr_label["@value"] == "Bonjour", "French label @value should be 'Bonjour'"
+      assert Map.has_key?(fr_label, "@language"), "French label should have @language"
+
+      # Check descriptions as well
+      descriptions = List.wrap(resource1["ex:description"])
+      assert length(descriptions) == 2, "Should have 2 description variants"
+
+      en_desc = Enum.find(descriptions, fn d -> d["@language"] == "en" end)
+      assert en_desc != nil, "English description should exist"
+      assert en_desc["@value"] == "An example item"
+      assert Map.has_key?(en_desc, "@language")
+
+      es_desc = Enum.find(descriptions, fn d -> d["@language"] == "es" end)
+      assert es_desc != nil, "Spanish description should exist"
+      assert es_desc["@value"] == "Un artículo de ejemplo"
+      assert Map.has_key?(es_desc, "@language")
+
+      # Verify resource2 also maintains its language tag
+      resource2 = Enum.find(items, fn item -> item["@id"] == "http://example.org/resource2" end)
+      assert resource2 != nil, "resource2 should be in framed output"
+
+      resource2_label = resource2["rdfs:label"]
+
+      # It could be a single map or wrapped in a list
+      resource2_label_map =
+        if is_list(resource2_label), do: hd(resource2_label), else: resource2_label
+
+      assert resource2_label_map["@value"] == "World"
+      assert resource2_label_map["@language"] == "en"
+    end
   end
 end
