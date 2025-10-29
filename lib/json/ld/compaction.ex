@@ -26,7 +26,16 @@ defmodule JSON.LD.Compaction do
       do: element
 
   # 3) If element is an array
-  def compact(element, active_context, active_property, options, compact_arrays, ordered, frame, node_map)
+  def compact(
+        element,
+        active_context,
+        active_property,
+        options,
+        compact_arrays,
+        ordered,
+        frame,
+        node_map
+      )
       when is_list(element) do
     if System.get_env("DEBUG_COMPACT") do
       IO.puts("\n=== COMPACTING ARRAY ===")
@@ -38,7 +47,16 @@ defmodule JSON.LD.Compaction do
     # 3.1) and 3.2)
     result =
       Enum.flat_map(element, fn item ->
-        case compact(item, active_context, active_property, options, compact_arrays, ordered, frame, node_map) do
+        case compact(
+               item,
+               active_context,
+               active_property,
+               options,
+               compact_arrays,
+               ordered,
+               frame,
+               node_map
+             ) do
           nil -> []
           compacted_item -> [compacted_item]
         end
@@ -69,6 +87,7 @@ defmodule JSON.LD.Compaction do
         if System.get_env("DEBUG_COMPACT") do
           IO.puts("→ Converting to nil (JSON-LD 1.0 mode)")
         end
+
         nil
 
       # In JSON-LD 1.1 (non-framing), preserve empty arrays (don't unwrap them)
@@ -78,6 +97,7 @@ defmodule JSON.LD.Compaction do
         if System.get_env("DEBUG_COMPACT") do
           IO.puts("→ Preserving empty array (JSON-LD 1.1 non-framing mode)")
         end
+
         []
 
       # Don't unwrap single-element arrays if compact_arrays is false or for special properties
@@ -88,23 +108,36 @@ defmodule JSON.LD.Compaction do
         if System.get_env("DEBUG_COMPACT") do
           IO.puts("→ Keeping as array (no unwrapping)")
         end
+
         result
 
       # Unwrap single-element arrays
       true ->
-        result_value = case result do
-          [value] -> value
-          result -> result
-        end
+        result_value =
+          case result do
+            [value] -> value
+            result -> result
+          end
+
         if System.get_env("DEBUG_COMPACT") do
           IO.puts("→ Unwrapping: #{inspect(result)} => #{inspect(result_value)}")
         end
+
         result_value
     end
   end
 
   # 4) Otherwise element is a map.
-  def compact(element, active_context, active_property, options, compact_arrays, ordered, frame, node_map)
+  def compact(
+        element,
+        active_context,
+        active_property,
+        options,
+        compact_arrays,
+        ordered,
+        frame,
+        node_map
+      )
       when is_map(element) do
     # 1) Initialize type-scoped context to active context. This is used for compacting values that may be relevant to any previous type-scoped context.
     type_scoped_context = active_context
@@ -467,7 +500,8 @@ defmodule JSON.LD.Compaction do
 
               # 12.8.6)
               # Extract nested frame for this property if frame exists
-              property_frame =
+              # Track whether property has explicit frame entry
+              {property_frame, has_explicit_frame} =
                 if frame != nil and is_map(frame) do
                   if System.get_env("DEBUG_FRAMING") != nil and item_active_property == "domain" do
                     IO.puts("\n=== EXTRACTING NESTED FRAME ===")
@@ -477,12 +511,45 @@ defmodule JSON.LD.Compaction do
                   end
 
                   case Map.get(frame, item_active_property) do
-                    [first | _] when is_map(first) -> first
-                    val when is_map(val) -> val
-                    _ -> frame  # Use parent frame if no nested frame
+                    [first | _] when is_map(first) -> {first, true}
+                    val when is_map(val) -> {val, true}
+                    # Use parent frame if no nested frame
+                    _ -> {frame, false}
                   end
                 else
-                  frame
+                  {frame, false}
+                end
+
+              # Only check for scoped context if property has explicit frame entry
+              # This prevents parent frame's @context from leaking into child properties
+              scoped_context =
+                if has_explicit_frame && is_map(property_frame) &&
+                     Map.has_key?(property_frame, "@context") do
+                  property_frame["@context"]
+                else
+                  nil
+                end
+
+              # If there's a scoped context, merge it into active_context for compaction
+              compaction_context =
+                if scoped_context do
+                  Context.update(
+                    active_context,
+                    scoped_context,
+                    override_protected: true,
+                    processor_options: options
+                  )
+                  |> Context.set_inverse()
+                else
+                  active_context
+                end
+
+              # Remove @context from property_frame before recursion to prevent nested injection
+              property_frame_for_recursion =
+                if scoped_context do
+                  Map.delete(property_frame, "@context")
+                else
+                  property_frame
                 end
 
               compacted_item =
@@ -492,14 +559,26 @@ defmodule JSON.LD.Compaction do
                   true -> expanded_item
                 end
                 |> compact(
-                  active_context,
+                  # Use context with scoped context merged
+                  compaction_context,
                   item_active_property,
                   options,
                   compact_arrays,
                   ordered,
-                  property_frame,  # Use nested frame
+                  # Use frame without @context for recursion
+                  property_frame_for_recursion,
                   node_map
                 )
+
+              # Inject scoped @context from frame if present
+              # Normative: Property-scoped contexts in frames should appear in output
+              compacted_item =
+                if scoped_context && is_map(compacted_item) do
+                  # Add @context from frame to compacted item
+                  Map.put(compacted_item, "@context", scoped_context)
+                else
+                  compacted_item
+                end
 
               cond do
                 # 12.8.7)
@@ -752,7 +831,22 @@ defmodule JSON.LD.Compaction do
 
                       # 12.8.9.5)
                       "@index" in container and index_key == "@index" ->
-                        {compacted_item, expanded_item["@index"]}
+                        map_key_value = expanded_item["@index"]
+                        # Unwrap single-element list (can happen during framing)
+                        map_key_value =
+                          case map_key_value do
+                            [single] when is_binary(single) -> single
+                            val -> val
+                          end
+
+                        if System.get_env("DEBUG_INDEX") do
+                          IO.puts("\n=== DEBUG @INDEX CONTAINER ===")
+                          IO.puts("map_key_value: #{inspect(map_key_value)}")
+                          IO.puts("is_list: #{is_list(map_key_value)}")
+                          IO.puts("is_binary: #{is_binary(map_key_value)}")
+                        end
+
+                        {compacted_item, map_key_value}
 
                       # 12.8.9.6)
                       "@index" in container and index_key != "@index" ->
@@ -839,6 +933,14 @@ defmodule JSON.LD.Compaction do
                   # 12.8.9.9)
                   map_key = map_key || compact_iri("@none", active_context, options)
 
+                  if System.get_env("DEBUG_INDEX") && "@index" in container do
+                    IO.puts("\n=== DEBUG MAP_KEY ===")
+                    IO.puts("map_key: #{inspect(map_key)}")
+                    IO.puts("is_list: #{is_list(map_key)}")
+                    IO.puts("is_binary: #{is_binary(map_key)}")
+                    IO.puts("item_active_property: #{item_active_property}")
+                  end
+
                   # 12.8.9.10)
                   map_object =
                     merge_compacted_value(map_object, map_key, compacted_item, as_array)
@@ -898,18 +1000,31 @@ defmodule JSON.LD.Compaction do
       old_value when is_list(old_value) and is_nil(value) ->
         if System.get_env("DEBUG_MERGE"), do: IO.puts("  merge: skip nil append to list")
         old_value
+
       # Replace nil with non-nil value (don't create [nil, value])
       old_value when is_nil(old_value) and not is_nil(value) ->
-        if System.get_env("DEBUG_MERGE"), do: IO.puts("  merge: replace nil with #{inspect(value, limit: 2)}, as_array=#{as_array}")
+        if System.get_env("DEBUG_MERGE"),
+          do:
+            IO.puts("  merge: replace nil with #{inspect(value, limit: 2)}, as_array=#{as_array}")
+
         if(as_array and not is_list(value), do: [value], else: value)
+
       # Both nil: remain nil
       old_value when is_nil(old_value) and is_nil(value) ->
         if System.get_env("DEBUG_MERGE"), do: IO.puts("  merge: both nil")
         nil
-      old_value when is_list(old_value) and is_list(value) -> old_value ++ value
-      old_value when is_list(old_value) -> old_value ++ [value]
-      old_value when is_list(value) -> [old_value | value]
-      old_value -> [old_value, value]
+
+      old_value when is_list(old_value) and is_list(value) ->
+        old_value ++ value
+
+      old_value when is_list(old_value) ->
+        old_value ++ [value]
+
+      old_value when is_list(value) ->
+        [old_value | value]
+
+      old_value ->
+        [old_value, value]
     end)
   end
 
@@ -959,309 +1074,312 @@ defmodule JSON.LD.Compaction do
       var
     else
       # 4) If vocab is true and var is an entry of inverse context:
-    term =
-      if vocab && Map.has_key?(inverse_context, var) do
-        # 4.1) Initialize default language based on the active context's default language, normalized to lower case and default base direction:
-        default_language =
-          if active_context.base_direction do
-            "#{active_context.default_language}_#{active_context.base_direction}"
-          else
-            active_context.default_language || "@none"
-          end
-          |> String.downcase()
+      term =
+        if vocab && Map.has_key?(inverse_context, var) do
+          # 4.1) Initialize default language based on the active context's default language, normalized to lower case and default base direction:
+          default_language =
+            if active_context.base_direction do
+              "#{active_context.default_language}_#{active_context.base_direction}"
+            else
+              active_context.default_language || "@none"
+            end
+            |> String.downcase()
 
-        # 4.2) If value is a map containing an @preserve entry, use the first element from the value of @preserve as value.
-        value =
-          case value do
-            %{"@preserve" => preserve} -> List.first(preserve)
-            _ -> value
-          end
+          # 4.2) If value is a map containing an @preserve entry, use the first element from the value of @preserve as value.
+          value =
+            case value do
+              %{"@preserve" => preserve} -> List.first(preserve)
+              _ -> value
+            end
 
-        # 4.4) Initialize type/language to @language, and type/language value to @null. These two variables will keep track of the preferred type mapping or language mapping for a term, based on what is compatible with value.
-        type_language = "@language"
-        type_language_value = "@null"
+          # 4.4) Initialize type/language to @language, and type/language value to @null. These two variables will keep track of the preferred type mapping or language mapping for a term, based on what is compatible with value.
+          type_language = "@language"
+          type_language_value = "@null"
 
-        # 4.3) and 4.5)
-        containers = if index?(value) and not graph?(value), do: ~w[@index @index@set], else: []
+          # 4.3) and 4.5)
+          containers = if index?(value) and not graph?(value), do: ~w[@index @index@set], else: []
 
-        {containers, type_language, type_language_value} =
-          cond do
-            # 4.6) If reverse is true, set type/language to @type, type/language value to @reverse, and append @set to containers.
-            reverse ->
-              containers = containers ++ ["@set"]
-              type_language = "@type"
-              type_language_value = "@reverse"
-              {containers, type_language, type_language_value}
+          {containers, type_language, type_language_value} =
+            cond do
+              # 4.6) If reverse is true, set type/language to @type, type/language value to @reverse, and append @set to containers.
+              reverse ->
+                containers = containers ++ ["@set"]
+                type_language = "@type"
+                type_language_value = "@reverse"
+                {containers, type_language, type_language_value}
 
-            # 4.7) Otherwise, if value is a list object, then set type/language and type/language value to the most specific values that work for all items in the list as follows:
-            list?(value) ->
-              # 4.7.1) If @index is not an entry in value, then append @list to containers.
-              containers = if not index?(value), do: containers ++ ["@list"], else: containers
+              # 4.7) Otherwise, if value is a list object, then set type/language and type/language value to the most specific values that work for all items in the list as follows:
+              list?(value) ->
+                # 4.7.1) If @index is not an entry in value, then append @list to containers.
+                containers = if not index?(value), do: containers ++ ["@list"], else: containers
 
-              # 4.7.2) Initialize list to the array associated with the @list entry in value.
-              list = value["@list"]
+                # 4.7.2) Initialize list to the array associated with the @list entry in value.
+                list = value["@list"]
 
-              # 4.7.3) Initialize common type and common language to null. If list is empty, set common language to default language.
-              {common_type, common_language} = {nil, if(Enum.empty?(list), do: default_language)}
+                # 4.7.3) Initialize common type and common language to null. If list is empty, set common language to default language.
+                {common_type, common_language} =
+                  {nil, if(Enum.empty?(list), do: default_language)}
 
-              {type_language, type_language_value} =
-                if Enum.empty?(list) do
-                  # SPEC ISSUE: Do we still need/want this deviation from the spec?
-                  {type_language, type_language_value}
-                else
-                  # 4.7.4) For each item in list:
-                  {common_type, common_language} =
-                    Enum.reduce_while(list, {common_type, common_language}, fn
-                      item, {common_type, common_language} ->
-                        # 4.7.4.1) Initialize item language to @none and item type to @none.
-                        {item_type, item_language} = {"@none", "@none"}
-
-                        # 4.7.4.2) If item contains an @value entry:
-                        {item_type, item_language} =
-                          if Map.has_key?(item, "@value") do
-                            cond do
-                              # 4.7.4.2.1) If item contains an @direction entry, then set item language to the concatenation of the item's @language entry (if any) the item's @direction, separated by an underscore ("_"), normalized to lower case.
-                              Map.has_key?(item, "@direction") ->
-                                {item_type,
-                                 String.downcase("#{item["@language"]}_#{item["@direction"]}")}
-
-                              # 4.7.4.2.2) Otherwise, if item contains an @language entry, then set item language to its associated value, normalized to lower case.
-                              Map.has_key?(item, "@language") ->
-                                {item_type, String.downcase(item["@language"])}
-
-                              # 4.7.4.2.3) Otherwise, if item contains a @type entry, set item type to its associated value.
-                              Map.has_key?(item, "@type") ->
-                                {item["@type"], item_language}
-
-                              # 4.7.4.2.4) Otherwise, set item language to @null.
-                              true ->
-                                {item_type, "@null"}
-                            end
-
-                            # 4.7.4.3) Otherwise, set item type to @id.
-                          else
-                            {"@id", item_language}
-                          end
-
-                        common_language =
-                          cond do
-                            # 4.7.4.4) If common language is null, set it to item language.
-                            is_nil(common_language) ->
-                              item_language
-
-                            # 4.7.4.5) Otherwise, if item language does not equal common language and item contains a @value entry, then set common language to @none because list items have conflicting languages.
-                            item_language != common_language and Map.has_key?(item, "@value") ->
-                              "@none"
-
-                            true ->
-                              common_language
-                          end
-
-                        common_type =
-                          cond do
-                            # 4.7.4.6) If common type is null, set it to item type.
-                            is_nil(common_type) -> item_type
-                            # 4.7.4.7) Otherwise, if item type does not equal common type, then set common type to @none because list items have conflicting types.
-                            item_type != common_type -> "@none"
-                            true -> common_type
-                          end
-
-                        # 4.7.4.8) If common language is @none and common type is @none, then stop processing items in the list because it has been detected that there is no common language or type amongst the items.
-                        if common_language == "@none" and common_type == "@none" do
-                          {:halt, {common_type, common_language}}
-                        else
-                          {:cont, {common_type, common_language}}
-                        end
-                    end)
-
-                  # 4.7.5) If common language is null, set common language to @none.
-                  common_language = common_language || "@none"
-
-                  # 4.7.6) If common type is null, set it to @none.
-                  common_type = common_type || "@none"
-
-                  # 4.7.7) If common type is not @none then set type/language to @type and type/language value to common type.
-                  if common_type != "@none" do
-                    type_language = "@type"
-                    type_language_value = common_type
+                {type_language, type_language_value} =
+                  if Enum.empty?(list) do
+                    # SPEC ISSUE: Do we still need/want this deviation from the spec?
                     {type_language, type_language_value}
                   else
-                    # 4.7.8) Otherwise, set type/language value to common language.
-                    type_language_value = common_language
-                    {type_language, type_language_value}
+                    # 4.7.4) For each item in list:
+                    {common_type, common_language} =
+                      Enum.reduce_while(list, {common_type, common_language}, fn
+                        item, {common_type, common_language} ->
+                          # 4.7.4.1) Initialize item language to @none and item type to @none.
+                          {item_type, item_language} = {"@none", "@none"}
+
+                          # 4.7.4.2) If item contains an @value entry:
+                          {item_type, item_language} =
+                            if Map.has_key?(item, "@value") do
+                              cond do
+                                # 4.7.4.2.1) If item contains an @direction entry, then set item language to the concatenation of the item's @language entry (if any) the item's @direction, separated by an underscore ("_"), normalized to lower case.
+                                Map.has_key?(item, "@direction") ->
+                                  {item_type,
+                                   String.downcase("#{item["@language"]}_#{item["@direction"]}")}
+
+                                # 4.7.4.2.2) Otherwise, if item contains an @language entry, then set item language to its associated value, normalized to lower case.
+                                Map.has_key?(item, "@language") ->
+                                  {item_type, String.downcase(item["@language"])}
+
+                                # 4.7.4.2.3) Otherwise, if item contains a @type entry, set item type to its associated value.
+                                Map.has_key?(item, "@type") ->
+                                  {item["@type"], item_language}
+
+                                # 4.7.4.2.4) Otherwise, set item language to @null.
+                                true ->
+                                  {item_type, "@null"}
+                              end
+
+                              # 4.7.4.3) Otherwise, set item type to @id.
+                            else
+                              {"@id", item_language}
+                            end
+
+                          common_language =
+                            cond do
+                              # 4.7.4.4) If common language is null, set it to item language.
+                              is_nil(common_language) ->
+                                item_language
+
+                              # 4.7.4.5) Otherwise, if item language does not equal common language and item contains a @value entry, then set common language to @none because list items have conflicting languages.
+                              item_language != common_language and Map.has_key?(item, "@value") ->
+                                "@none"
+
+                              true ->
+                                common_language
+                            end
+
+                          common_type =
+                            cond do
+                              # 4.7.4.6) If common type is null, set it to item type.
+                              is_nil(common_type) -> item_type
+                              # 4.7.4.7) Otherwise, if item type does not equal common type, then set common type to @none because list items have conflicting types.
+                              item_type != common_type -> "@none"
+                              true -> common_type
+                            end
+
+                          # 4.7.4.8) If common language is @none and common type is @none, then stop processing items in the list because it has been detected that there is no common language or type amongst the items.
+                          if common_language == "@none" and common_type == "@none" do
+                            {:halt, {common_type, common_language}}
+                          else
+                            {:cont, {common_type, common_language}}
+                          end
+                      end)
+
+                    # 4.7.5) If common language is null, set common language to @none.
+                    common_language = common_language || "@none"
+
+                    # 4.7.6) If common type is null, set it to @none.
+                    common_type = common_type || "@none"
+
+                    # 4.7.7) If common type is not @none then set type/language to @type and type/language value to common type.
+                    if common_type != "@none" do
+                      type_language = "@type"
+                      type_language_value = common_type
+                      {type_language, type_language_value}
+                    else
+                      # 4.7.8) Otherwise, set type/language value to common language.
+                      type_language_value = common_language
+                      {type_language, type_language_value}
+                    end
                   end
-                end
 
-              {containers, type_language, type_language_value}
+                {containers, type_language, type_language_value}
 
-            # 4.8) Otherwise, if value is a graph object, prefer a mapping most appropriate for the particular value.
-            graph?(value) ->
-              # 4.8.1) If value contains an @index entry, append the values @graph@index and @graph@index@set to containers.
-              containers =
-                if Map.has_key?(value, "@index"),
-                  do: containers ++ ~w[@graph@index @graph@index@set],
-                  else: containers
+              # 4.8) Otherwise, if value is a graph object, prefer a mapping most appropriate for the particular value.
+              graph?(value) ->
+                # 4.8.1) If value contains an @index entry, append the values @graph@index and @graph@index@set to containers.
+                containers =
+                  if Map.has_key?(value, "@index"),
+                    do: containers ++ ~w[@graph@index @graph@index@set],
+                    else: containers
 
-              # 4.8.2) If value contains an @id entry, append the values @graph@id and @graph@id@set to containers.
-              containers =
-                if Map.has_key?(value, "@id"),
-                  do: containers ++ ~w[@graph@id @graph@id@set],
-                  else: containers
+                # 4.8.2) If value contains an @id entry, append the values @graph@id and @graph@id@set to containers.
+                containers =
+                  if Map.has_key?(value, "@id"),
+                    do: containers ++ ~w[@graph@id @graph@id@set],
+                    else: containers
 
-              # 4.8.3) Append the values @graph @graph@set, and @set to containers.
-              containers = containers ++ ~w[@graph @graph@set @set]
+                # 4.8.3) Append the values @graph @graph@set, and @set to containers.
+                containers = containers ++ ~w[@graph @graph@set @set]
 
-              # 4.8.4) If value does not contain an @index entry, append the values @graph@index and @graph@index@set to containers.
-              containers =
-                if not Map.has_key?(value, "@index"),
-                  do: containers ++ ~w[@graph@index @graph@index@set],
-                  else: containers
+                # 4.8.4) If value does not contain an @index entry, append the values @graph@index and @graph@index@set to containers.
+                containers =
+                  if not Map.has_key?(value, "@index"),
+                    do: containers ++ ~w[@graph@index @graph@index@set],
+                    else: containers
 
-              # 4.8.5) If the value does not contain an @id entry, append the values @graph@id and @graph@id@set to containers.
-              containers =
-                if not Map.has_key?(value, "@id"),
-                  do: containers ++ ~w[@graph@id @graph@id@set],
-                  else: containers
+                # 4.8.5) If the value does not contain an @id entry, append the values @graph@id and @graph@id@set to containers.
+                containers =
+                  if not Map.has_key?(value, "@id"),
+                    do: containers ++ ~w[@graph@id @graph@id@set],
+                    else: containers
 
-              # 4.8.6) Append the values @index and @index@set to containers.
-              containers = containers ++ ~w[@index @index@set]
+                # 4.8.6) Append the values @index and @index@set to containers.
+                containers = containers ++ ~w[@index @index@set]
 
-              # 4.8.7) Set type/language to @type and set type/language value to @id.
-              {containers, "@type", "@id"}
+                # 4.8.7) Set type/language to @type and set type/language value to @id.
+                {containers, "@type", "@id"}
 
-            # 4.9) Otherwise
-            true ->
-              # 4.9.1) If value is a value object:
-              {containers, type_language, type_language_value} =
-                if value?(value) do
-                  cond do
-                    # 4.9.1.1) If value contains an @direction entry and does not contain an @index entry, then set type/language value to the concatenation of the value's @language entry (if any) and the value's @direction entry, separated by an underscore ("_"), normalized to lower case. Append @language and @language@set to containers.
-                    Map.has_key?(value, "@direction") and not Map.has_key?(value, "@index") ->
-                      type_language_value =
-                        String.downcase("#{value["@language"]}_#{value["@direction"]}")
+              # 4.9) Otherwise
+              true ->
+                # 4.9.1) If value is a value object:
+                {containers, type_language, type_language_value} =
+                  if value?(value) do
+                    cond do
+                      # 4.9.1.1) If value contains an @direction entry and does not contain an @index entry, then set type/language value to the concatenation of the value's @language entry (if any) and the value's @direction entry, separated by an underscore ("_"), normalized to lower case. Append @language and @language@set to containers.
+                      Map.has_key?(value, "@direction") and not Map.has_key?(value, "@index") ->
+                        type_language_value =
+                          String.downcase("#{value["@language"]}_#{value["@direction"]}")
 
-                      containers = containers ++ ~w[@language @language@set]
-                      {containers, type_language, type_language_value}
+                        containers = containers ++ ~w[@language @language@set]
+                        {containers, type_language, type_language_value}
 
-                    # 4.9.1.2) Otherwise, if value contains an @language entry and does not contain an @index entry, then set type/language value to the value of @language normalized to lower case, and append @language, and @language@set to containers.
-                    Map.has_key?(value, "@language") and not Map.has_key?(value, "@index") ->
-                      type_language_value = String.downcase(value["@language"])
-                      containers = containers ++ ~w[@language @language@set]
-                      {containers, type_language, type_language_value}
+                      # 4.9.1.2) Otherwise, if value contains an @language entry and does not contain an @index entry, then set type/language value to the value of @language normalized to lower case, and append @language, and @language@set to containers.
+                      Map.has_key?(value, "@language") and not Map.has_key?(value, "@index") ->
+                        type_language_value = String.downcase(value["@language"])
+                        containers = containers ++ ~w[@language @language@set]
+                        {containers, type_language, type_language_value}
 
-                    # 4.9.1.3) Otherwise, if value contains an @type entry, then set type/language value to its associated value and set type/language to @type.
-                    Map.has_key?(value, "@type") ->
-                      {containers, "@type", value["@type"]}
+                      # 4.9.1.3) Otherwise, if value contains an @type entry, then set type/language value to its associated value and set type/language to @type.
+                      Map.has_key?(value, "@type") ->
+                        {containers, "@type", value["@type"]}
 
-                    true ->
-                      {containers, type_language, type_language_value}
+                      true ->
+                        {containers, type_language, type_language_value}
+                    end
+
+                    # 4.9.2) Otherwise, set type/language to @type and set type/language value to @id, and append @id, @id@set, @type, and @set@type, to containers.
+                  else
+                    containers = containers ++ ~w[@id @id@set @type @set@type]
+                    {containers, "@type", "@id"}
                   end
 
-                  # 4.9.2) Otherwise, set type/language to @type and set type/language value to @id, and append @id, @id@set, @type, and @set@type, to containers.
-                else
-                  containers = containers ++ ~w[@id @id@set @type @set@type]
-                  {containers, "@type", "@id"}
-                end
-
-              # 4.9.3) Append @set to containers.
-              containers = containers ++ ["@set"]
-              {containers, type_language, type_language_value}
-          end
-
-        # 4.10) Append @none to containers. This represents the non-existence of a container mapping, and it will be the last container mapping value to be checked as it is the most generic.
-        containers = containers ++ ["@none"]
-
-        # 4.11) If processing mode is not json-ld-1.0 and value is not a map or does not contain an @index entry, append @index and @index@set to containers.
-        containers =
-          if processing_mode != "json-ld-1.0" and not index?(value) do
-            containers ++ ~w[@index @index@set]
-          else
-            containers
-          end
-
-        # 4.12) If processing mode is not json-ld-1.0 and value is a map containing only an @value entry, append @language and @language@set to containers.
-        containers =
-          if processing_mode != "json-ld-1.0" and value?(value) and map_size(value) == 1 do
-            containers ++ ~w[@language and @language@set]
-          else
-            containers
-          end
-
-        # 4.13) If type/language value is null, set type/language value to @null. This is the key under which null values are stored in the inverse context entry.
-        type_language_value = type_language_value || "@null"
-
-        # 4.14) Initialize preferred values to an empty array. This array will indicate, in order, the preferred values for a term's type mapping or language mapping.
-        preferred_values = []
-
-        # 4.15) If type/language value is @reverse, append @reverse to preferred values.
-        preferred_values =
-          if type_language_value == "@reverse",
-            do: preferred_values ++ ["@reverse"],
-            else: preferred_values
-
-        # 4.16) If type/language value is @id or @reverse and value is a map containing an @id entry
-        {preferred_values, type_language} =
-          if type_language_value in ~w[@id @reverse] and is_map(value) and
-               Map.has_key?(value, "@id") do
-            # 4.16.1) If the result of IRI compacting the value of the @id entry in value has a term definition in the active context with an IRI mapping that equals the value of the @id entry in value, then append @vocab, @id, and @none, in that order, to preferred values.
-
-            compact_id = compact_iri(value["@id"], active_context, options)
-            term_def = active_context.term_defs[compact_id]
-
-            if term_def && term_def.iri_mapping == value["@id"] do
-              {preferred_values ++ ~w[@vocab @id @none], type_language}
-            else
-              # 4.16.2) Otherwise, append @id, @vocab, and @none, in that order, to preferred values.
-              {preferred_values ++ ~w[@id @vocab @none], type_language}
+                # 4.9.3) Append @set to containers.
+                containers = containers ++ ["@set"]
+                {containers, type_language, type_language_value}
             end
-          else
-            # 4.17) Otherwise, append type/language value and @none, in that order, to preferred values. If value is a list object with an empty array as the value of @list, set type/language to @any.
-            {
-              preferred_values ++ [type_language_value, "@none"],
-              if list?(value) and value["@list"] == [] do
-                "@any"
+
+          # 4.10) Append @none to containers. This represents the non-existence of a container mapping, and it will be the last container mapping value to be checked as it is the most generic.
+          containers = containers ++ ["@none"]
+
+          # 4.11) If processing mode is not json-ld-1.0 and value is not a map or does not contain an @index entry, append @index and @index@set to containers.
+          containers =
+            if processing_mode != "json-ld-1.0" and not index?(value) do
+              containers ++ ~w[@index @index@set]
+            else
+              containers
+            end
+
+          # 4.12) If processing mode is not json-ld-1.0 and value is a map containing only an @value entry, append @language and @language@set to containers.
+          containers =
+            if processing_mode != "json-ld-1.0" and value?(value) and map_size(value) == 1 do
+              containers ++ ~w[@language and @language@set]
+            else
+              containers
+            end
+
+          # 4.13) If type/language value is null, set type/language value to @null. This is the key under which null values are stored in the inverse context entry.
+          type_language_value = type_language_value || "@null"
+
+          # 4.14) Initialize preferred values to an empty array. This array will indicate, in order, the preferred values for a term's type mapping or language mapping.
+          preferred_values = []
+
+          # 4.15) If type/language value is @reverse, append @reverse to preferred values.
+          preferred_values =
+            if type_language_value == "@reverse",
+              do: preferred_values ++ ["@reverse"],
+              else: preferred_values
+
+          # 4.16) If type/language value is @id or @reverse and value is a map containing an @id entry
+          {preferred_values, type_language} =
+            if type_language_value in ~w[@id @reverse] and is_map(value) and
+                 Map.has_key?(value, "@id") do
+              # 4.16.1) If the result of IRI compacting the value of the @id entry in value has a term definition in the active context with an IRI mapping that equals the value of the @id entry in value, then append @vocab, @id, and @none, in that order, to preferred values.
+
+              compact_id = compact_iri(value["@id"], active_context, options)
+              term_def = active_context.term_defs[compact_id]
+
+              if term_def && term_def.iri_mapping == value["@id"] do
+                {preferred_values ++ ~w[@vocab @id @none], type_language}
               else
-                type_language
+                # 4.16.2) Otherwise, append @id, @vocab, and @none, in that order, to preferred values.
+                {preferred_values ++ ~w[@id @vocab @none], type_language}
               end
-            }
-          end
+            else
+              # 4.17) Otherwise, append type/language value and @none, in that order, to preferred values. If value is a list object with an empty array as the value of @list, set type/language to @any.
+              {
+                preferred_values ++ [type_language_value, "@none"],
+                if list?(value) and value["@list"] == [] do
+                  "@any"
+                else
+                  type_language
+                end
+              }
+            end
 
-        # 4.18) Append @any to preferred values.
-        preferred_values = preferred_values ++ ["@any"]
+          # 4.18) Append @any to preferred values.
+          preferred_values = preferred_values ++ ["@any"]
 
-        # 4.19) If preferred values contains any entry having an underscore ("_"), append the substring of that entry from the underscore to the end of the string to preferred values.
-        preferred_values =
-          if lang_dir = Enum.find(preferred_values, &String.contains?(&1, "_")) do
-            preferred_values ++ ["_" <> (lang_dir |> String.split("_") |> List.last())]
-          else
-            preferred_values
-          end
+          # 4.19) If preferred values contains any entry having an underscore ("_"), append the substring of that entry from the underscore to the end of the string to preferred values.
+          preferred_values =
+            if lang_dir = Enum.find(preferred_values, &String.contains?(&1, "_")) do
+              preferred_values ++ ["_" <> (lang_dir |> String.split("_") |> List.last())]
+            else
+              preferred_values
+            end
 
-        # 4.20) Initialize term to the result of the Term Selection algorithm, passing var, containers, type/language, and preferred values.
-        select_term(active_context, var, containers, type_language, preferred_values)
-      end
-
-    cond do
-      # 4.21) If term is not null, return term.
-      not is_nil(term) ->
-        term
-
-      # 5) At this point, there is no simple term that var can be compacted to. If vocab is true and active context has a vocabulary mapping:
-      # 5.1) If var begins with the vocabulary mapping's value but is longer, then initialize suffix to the substring of var that does not match. If suffix does not have a term definition in active context, then return suffix.
-      vocab && active_context.vocabulary_mapping &&
-          String.starts_with?(var, active_context.vocabulary_mapping) ->
-        suffix = String.replace_prefix(var, active_context.vocabulary_mapping, "")
-
-        if suffix != "" && is_nil(active_context.term_defs[suffix]) do
-          String.replace_prefix(var, active_context.vocabulary_mapping, "")
-        else
-          create_compact_iri(var, active_context, value, vocab)
+          # 4.20) Initialize term to the result of the Term Selection algorithm, passing var, containers, type/language, and preferred values.
+          select_term(active_context, var, containers, type_language, preferred_values)
         end
 
-      true ->
-        create_compact_iri(var, active_context, value, vocab)
+      cond do
+        # 4.21) If term is not null, return term.
+        not is_nil(term) ->
+          term
+
+        # 5) At this point, there is no simple term that var can be compacted to. If vocab is true and active context has a vocabulary mapping:
+        # 5.1) If var begins with the vocabulary mapping's value but is longer, then initialize suffix to the substring of var that does not match. If suffix does not have a term definition in active context, then return suffix.
+        vocab && active_context.vocabulary_mapping &&
+            String.starts_with?(var, active_context.vocabulary_mapping) ->
+          suffix = String.replace_prefix(var, active_context.vocabulary_mapping, "")
+
+          if suffix != "" && is_nil(active_context.term_defs[suffix]) do
+            String.replace_prefix(var, active_context.vocabulary_mapping, "")
+          else
+            create_compact_iri(var, active_context, value, vocab)
+          end
+
+        true ->
+          create_compact_iri(var, active_context, value, vocab)
+      end
     end
-    end  # Close the else block from line 899
+
+    # Close the else block from line 899
   end
 
   defp create_compact_iri(var, active_context, value, vocab) do
@@ -1336,6 +1454,7 @@ defmodule JSON.LD.Compaction do
               if System.get_env("DEBUG_COMPACTION") do
                 IO.puts("✓ Found exact term match for #{var}, skipping error")
               end
+
               :ok
 
             # NEW: Only raise error if the prefix is a known URI scheme
@@ -1344,6 +1463,7 @@ defmodule JSON.LD.Compaction do
               if System.get_env("DEBUG_COMPACTION") do
                 IO.puts("✗ Prefix '#{term}' is a URI scheme, raising error")
               end
+
               raise JSON.LD.Error.iri_confused_with_prefix(var, term)
 
             # Prefix is not a URI scheme, allow CURIE expansion
@@ -1351,6 +1471,7 @@ defmodule JSON.LD.Compaction do
               if System.get_env("DEBUG_COMPACTION") do
                 IO.puts("✓ Prefix '#{term}' is not a URI scheme, allowing CURIE: #{var}")
               end
+
               :ok
           end
         end
@@ -1444,6 +1565,8 @@ defmodule JSON.LD.Compaction do
   Details at <https://www.w3.org/TR/json-ld-api/#value-compaction>
   """
   @spec compact_value(any, Context.t(), String.t(), Options.t(), map | nil) :: any
+  def compact_value(value, active_context, active_property, options, frame \\ nil)
+
   def compact_value(_value, %{inverse_context: nil}, _active_property, _options, _frame) do
     #    compact_value(value, Context.set_inverse(active_context), active_property, options, frame)
     raise """
@@ -1452,7 +1575,7 @@ defmodule JSON.LD.Compaction do
     """
   end
 
-  def compact_value(value, active_context, active_property, options, frame \\ nil) do
+  def compact_value(value, active_context, active_property, options, frame) do
     term_def = active_context.term_defs[active_property]
 
     # 4) Initialize language to the language mapping for active property in active context, if any, otherwise to the default language of active context.
@@ -1461,12 +1584,14 @@ defmodule JSON.LD.Compaction do
     # 5) Initialize direction to the direction mapping for active property in active context, if any, otherwise to the default base direction of active context.
     direction = Context.TermDefinition.direction(term_def, active_context) |> to_string
 
-    if System.get_env("DEBUG_FRAMING") != nil and active_property == "domain" and is_map(value) and Map.has_key?(value, "@id") do
+    if System.get_env("DEBUG_FRAMING") != nil and active_property == "domain" and is_map(value) and
+         Map.has_key?(value, "@id") do
       IO.puts("\n=== COMPACT_VALUE for domain ===")
       IO.puts("Value keys: #{inspect(Map.keys(value))}")
       IO.puts("Value: #{inspect(value, limit: 5)}")
       IO.puts("Frame: #{inspect(frame, limit: 3)}")
       IO.puts("term_def: #{inspect(term_def != nil)}")
+
       if term_def do
         IO.puts("term_def.type_mapping: #{inspect(term_def.type_mapping)}")
       end
@@ -1482,12 +1607,13 @@ defmodule JSON.LD.Compaction do
             # This allows framing to control embedding when explicitly requested via @embed: @always
             frame != nil && has_always_embed_in_frame?(frame, active_property) ->
               if System.get_env("DEBUG_FRAMING") != nil do
-                IO.puts "=== EMBED CHECK TRIGGERED ==="
-                IO.puts "Property: #{active_property}"
-                IO.puts "Value @id: #{id}"
-                IO.puts "Frame requests @embed: @always"
-                IO.puts "========================"
+                IO.puts("=== EMBED CHECK TRIGGERED ===")
+                IO.puts("Property: #{active_property}")
+                IO.puts("Value @id: #{id}")
+                IO.puts("Frame requests @embed: @always")
+                IO.puts("========================")
               end
+
               value
 
             # 6.1) If the type mapping of active property is set to @id, set result to the result of IRI compacting the value associated with the @id entry using false for vocab.
@@ -1552,18 +1678,22 @@ defmodule JSON.LD.Compaction do
       end
 
     # 11) If result is a map, replace each key in result with the result of IRI compacting that key.
-    final_result = if is_map(result) do
-      Map.new(result, fn {k, v} -> {compact_iri(k, active_context, options), v} end)
-    else
-      result
-    end
+    final_result =
+      if is_map(result) do
+        Map.new(result, fn {k, v} -> {compact_iri(k, active_context, options), v} end)
+      else
+        result
+      end
 
-    if System.get_env("DEBUG_FRAMING") != nil and active_property == "domain" and is_map(value) and Map.has_key?(value, "@id") do
+    if System.get_env("DEBUG_FRAMING") != nil and active_property == "domain" and is_map(value) and
+         Map.has_key?(value, "@id") do
       IO.puts("compact_value RETURNING:")
       IO.puts("  keys: #{inspect(Map.keys(final_result || %{}))}")
+
       if is_map(final_result) and map_size(final_result) <= 2 do
         IO.puts("  MINIMAL: #{inspect(final_result)}")
       end
+
       IO.puts("================================\n")
     end
 
@@ -1601,30 +1731,14 @@ defmodule JSON.LD.Compaction do
     end)
   end
 
-  # Helper function to check if the frame itself has @embed: @always
-  # If the frame has @embed: @always, we should embed all values
-  defp frame_has_always_embed?(frame) when is_map(frame) do
-    frame["@embed"] in ["@always", true]
-  end
-
-  defp frame_has_always_embed?(_frame), do: false
-
-  # Helper function to check if a property is explicitly mentioned in the frame
-  # If a property is in the frame, it means we want to frame/embed it
-  defp property_in_frame?(frame, property) when is_map(frame) do
-    Map.has_key?(frame, property)
-  end
-
-  defp property_in_frame?(_frame, _property), do: false
-
   # Helper function to check if a property in the frame has @embed: @always
   # This allows framing to control embedding even when context has @type: @id
   defp has_always_embed_in_frame?(frame, property) when is_map(frame) do
     if System.get_env("DEBUG_FRAMING") do
-      IO.puts "=== CHECKING FRAME FOR @EMBED ==="
-      IO.puts "Property: #{inspect(property)}"
-      IO.puts "Frame keys: #{inspect(Map.keys(frame) |> Enum.take(5))}"
-      IO.puts "Property in frame: #{Map.has_key?(frame, property)}"
+      IO.puts("=== CHECKING FRAME FOR @EMBED ===")
+      IO.puts("Property: #{inspect(property)}")
+      IO.puts("Frame keys: #{inspect(Map.keys(frame) |> Enum.take(5))}")
+      IO.puts("Property in frame: #{Map.has_key?(frame, property)}")
     end
 
     # Get the property frame (handle both direct and array-wrapped frames)
@@ -1644,9 +1758,9 @@ defmodule JSON.LD.Compaction do
       end
 
     if System.get_env("DEBUG_FRAMING") do
-      IO.puts "Property frame: #{inspect(property_frame, limit: 3)}"
-      IO.puts "Result: #{result}"
-      IO.puts "=======================\n"
+      IO.puts("Property frame: #{inspect(property_frame, limit: 3)}")
+      IO.puts("Result: #{result}")
+      IO.puts("=======================\n")
     end
 
     result

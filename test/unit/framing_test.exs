@@ -184,5 +184,188 @@ defmodule JSON.LD.FramingTest do
       assert result["@context"] != nil
       assert result["@graph"] == [] or is_nil(result["@graph"])
     end
+
+    test "user test" do
+      input = %{
+        "@context" => %{"@vocab" => "user:"},
+        "@id" => "urn:user:id:TEST",
+        "@type" => "ClassificationFacet",
+        "account" => %{"@id" => "urn:user:id:Test"},
+        "classification_scheme" => %{"@id" => "urn:user:id:CS1"},
+        "created_at" => 1_761_663_884_124,
+        "created_by" => "system",
+        "external_context" => [
+          %{
+            "$id" => "urn:example:schema:is-equipment-affected",
+            "$schema" => "https://json-schema.org/draft/2020-12/schema",
+            "@context" => %{
+              "$id" => "@id",
+              "$schema" => %{
+                "@id" => "https://json-schema.org/meta#schema",
+                "@type" => "@id"
+              },
+              "$vocabulary" => %{
+                "@container" => "@index",
+                "@id" => "https://json-schema.org/meta#vocabulary",
+                "@type" => "@id"
+              },
+              "@version" => 1.1,
+              "@vocab" => "https://json-schema.org/draft/2020-12/vocab/core#",
+              "additionalProperties" => %{
+                "@id" =>
+                  "https://json-schema.org/draft/2020-12/vocab/applicator#additionalProperties"
+              },
+              "default" => %{
+                "@id" => "https://json-schema.org/draft/2020-12/vocab/meta-data#default"
+              },
+              "description" => %{
+                "@id" => "https://json-schema.org/draft/2020-12/vocab/meta-data#description"
+              },
+              "properties" => %{
+                "@container" => "@index",
+                "@id" => "https://json-schema.org/draft/2020-12/vocab/applicator#properties"
+              },
+              "required" => %{
+                "@container" => "@set",
+                "@id" => "https://json-schema.org/draft/2020-12/vocab/validation#required"
+              },
+              "title" => %{
+                "@id" => "https://json-schema.org/draft/2020-12/vocab/meta-data#title"
+              },
+              "type" => %{
+                "@id" => "https://json-schema.org/draft/2020-12/vocab/validation#type"
+              }
+            },
+            "additionalProperties" => false,
+            "properties" => %{
+              "foo" => %{
+                "default" => false,
+                "type" => "boolean",
+                "description" => "A description.",
+                "title" => "A title"
+              }
+            },
+            "required" => ["foo"],
+            "type" => "object"
+          }
+        ],
+        "modified_at" => [1_761_663_884_124],
+        "modified_by" => ["system"],
+        "name" => ["Step 1"]
+      }
+
+      frame = %{
+        "@context" => %{"@vocab" => "user:"},
+        "@explicit" => false,
+        "@type" => "ClassificationFacet",
+        "user:account" => %{"@type" => %{"@default" => "Account"}},
+        "user:classification_scheme" => %{
+          "@type" => %{"@default" => "ClassificationScheme"}
+        },
+        "external_context" => %{
+          "@context" => %{
+            "$id" => "@id",
+            "$schema" => %{
+              "@id" => "https://json-schema.org/meta#schema",
+              "@type" => "@id"
+            },
+            "@version" => 1.1,
+            "@vocab" => "https://json-schema.org/draft/2020-12/vocab/core#",
+            "additionalProperties" => %{
+              "@id" =>
+                "https://json-schema.org/draft/2020-12/vocab/applicator#additionalProperties"
+            },
+            "default" => %{
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/meta-data#default"
+            },
+            "description" => %{
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/meta-data#description"
+            },
+            "properties" => %{
+              "@container" => "@index",
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/applicator#properties"
+            },
+            "required" => %{
+              "@container" => "@set",
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/validation#required"
+            },
+            "title" => %{
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/meta-data#title"
+            },
+            "type" => %{
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/validation#type"
+            }
+          },
+          "@explicit" => false
+        }
+      }
+
+      expected = %{
+        "@context" => %{"@vocab" => "user:"},
+        "@id" => "urn:user:id:TEST",
+        "@type" => "ClassificationFacet",
+        "account" => %{"@id" => "urn:user:id:Test", "@type" => "Account"},
+        "classification_scheme" => %{
+          "@id" => "urn:user:id:CS1",
+          "@type" => "ClassificationScheme"
+        },
+        "created_at" => 1_761_663_884_124,
+        "created_by" => "system",
+        "external_context" => %{
+          "@context" => %{
+            "$id" => "@id",
+            "$schema" => %{
+              "@id" => "https://json-schema.org/meta#schema",
+              "@type" => "@id"
+            },
+            "@version" => 1.1,
+            "@vocab" => "https://json-schema.org/draft/2020-12/vocab/core#",
+            "additionalProperties" => %{
+              "@id" =>
+                "https://json-schema.org/draft/2020-12/vocab/applicator#additionalProperties"
+            },
+            "default" => %{
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/meta-data#default"
+            },
+            "description" => %{
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/meta-data#description"
+            },
+            "properties" => %{
+              "@container" => "@index",
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/applicator#properties"
+            },
+            "required" => %{
+              "@container" => "@set",
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/validation#required"
+            },
+            "title" => %{
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/meta-data#title"
+            },
+            "type" => %{
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/validation#type"
+            }
+          },
+          "$id" => "urn:example:schema:is-equipment-affected",
+          "$schema" => "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties" => false,
+          "properties" => %{
+            "foo" => %{
+              "default" => false,
+              "type" => "boolean",
+              "description" => "A description.",
+              "title" => "A title"
+            }
+          },
+          "required" => ["foo"],
+          "type" => "object"
+        },
+        "modified_at" => 1_761_663_884_124,
+        "modified_by" => "system",
+        "name" => "Step 1"
+      }
+
+      result = JSON.LD.frame(input, frame)
+      assert expected == result
+    end
   end
 end

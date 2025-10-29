@@ -298,12 +298,6 @@ defmodule JSON.LD.Framing do
           _ -> @default
         end
 
-      if System.get_env("DEBUG_FRAMING") != nil do
-        IO.puts("\n=== CURRENT GRAPH ===")
-        IO.puts("current_graph: #{inspect(current_graph)}")
-        IO.puts("expanded_input length: #{inspect(length(List.wrap(expanded_input)))}")
-      end
-
       # Step 5: Initialize framing state
       # Normative: https://www.w3.org/TR/json-ld11-framing/#framing-algorithm Step 5
       # Extract framing flags from frame (they can also be in options, but frame takes precedence)
@@ -430,20 +424,7 @@ defmodule JSON.LD.Framing do
       # Step 6.3: Merge framing keywords from original frame
       # Normative: Framing keywords can be lost during expansion, so restore them
       # This preserves @embed, @explicit, etc. in nested frames
-      if System.get_env("DEBUG_FRAMING") != nil do
-        IO.puts("\n=== MERGING FRAMING KEYWORDS ===")
-        IO.puts("Original frame keys: #{inspect(Map.keys(frame) |> Enum.take(10))}")
-        IO.puts("Expanded frame_obj keys: #{inspect(Map.keys(frame_obj) |> Enum.take(10))}")
-        IO.puts("Original frame @embed: #{inspect(frame["@embed"])}")
-        IO.puts("Original frame structure: #{inspect(frame, limit: 5, pretty: true)}")
-      end
-
       frame_obj = merge_framing_keywords(frame_obj, frame)
-
-      if System.get_env("DEBUG_FRAMING") != nil do
-        IO.puts("After merge frame_obj keys: #{inspect(Map.keys(frame_obj) |> Enum.take(10))}")
-        IO.puts("After merge frame_obj @embed: #{inspect(frame_obj["@embed"])}")
-      end
 
       # Add root frame to state for use when embedding referenced nodes
       # Also add all frame objects for multi-frame matching support
@@ -460,17 +441,6 @@ defmodule JSON.LD.Framing do
       # Normative: JSON-LD 1.1 Framing spec - nodes with same @id across multiple
       # graphs should be merged when framing
 
-      if System.get_env("DEBUG_HUGE") do
-        all_graphs = Map.keys(node_map)
-        IO.puts("\n=== FRAMING GRAPH '#{current_graph}' ===")
-        IO.puts("Total graphs in node_map: #{length(all_graphs)}")
-
-        Enum.each(all_graphs, fn graph_id ->
-          node_count = map_size(Map.get(node_map, graph_id, %{}))
-          IO.puts("  Graph '#{graph_id}': #{node_count} nodes")
-        end)
-      end
-
       graph_to_frame =
         if current_graph == @default do
           # Merge nodes from all graphs into default graph
@@ -478,10 +448,6 @@ defmodule JSON.LD.Framing do
         else
           node_map[current_graph] || %{}
         end
-
-      if System.get_env("DEBUG_HUGE") do
-        IO.puts("Graph to frame (#{current_graph}): #{map_size(graph_to_frame)} nodes")
-      end
 
       # Update state.graph_map with merged nodes so get_node() can find them
       # This is critical for the framing algorithm to retrieve merged nodes
@@ -545,30 +511,16 @@ defmodule JSON.LD.Framing do
             end)
 
           # Filter out blank nodes that are embedded in other matches
-          filtered =
-            Enum.filter(matches, fn match ->
-              match_id = Map.get(match, @id)
-              is_blank = is_binary(match_id) and String.starts_with?(match_id, "_:")
 
-              # Keep the node if:
-              # 1. It's not a blank node, OR
-              # 2. It's a blank node but not embedded in another match
-              not is_blank or not MapSet.member?(embedded_ids, match_id)
-            end)
+          Enum.filter(matches, fn match ->
+            match_id = Map.get(match, @id)
+            is_blank = is_binary(match_id) and String.starts_with?(match_id, "_:")
 
-          if System.get_env("DEBUG_HUGE") do
-            filtered_count = length(filtered)
-            removed_count = length(matches) - filtered_count
-
-            if removed_count > 0 do
-              IO.puts("\n=== BLANK NODE FILTERING ===")
-              IO.puts("Matches before filtering: #{length(matches)}")
-              IO.puts("Matches after filtering: #{filtered_count}")
-              IO.puts("Removed #{removed_count} embedded blank nodes")
-            end
-          end
-
-          filtered
+            # Keep the node if:
+            # 1. It's not a blank node, OR
+            # 2. It's a blank node but not embedded in another match
+            not is_blank or not MapSet.member?(embedded_ids, match_id)
+          end)
         else
           # JSON-LD 1.0 or single match: No filtering
           matches
@@ -590,12 +542,6 @@ defmodule JSON.LD.Framing do
           # Create state with embed: :never (equivalent to embedded flag = false)
           included_state = %{final_state | embed: :never}
 
-          if System.get_env("DEBUG_INCLUDED") do
-            IO.puts("\n=== PROCESSING @INCLUDED ===")
-            IO.puts("Number of included frames: #{length(included_frames)}")
-            IO.puts("Number of subjects: #{length(Map.keys(graph_to_frame))}")
-          end
-
           # Match subjects using each @included frame
           # Use all subjects from the current graph
           included_matches =
@@ -603,24 +549,8 @@ defmodule JSON.LD.Framing do
               {matches, _state} =
                 match_frame(included_state, Map.keys(graph_to_frame), included_frame, nil)
 
-              if System.get_env("DEBUG_INCLUDED") do
-                IO.puts("Included frame matched #{length(matches)} nodes")
-              end
-
               matches
             end)
-
-          if System.get_env("DEBUG_INCLUDED") do
-            IO.puts("Total included matches: #{length(included_matches)}")
-
-            IO.puts(
-              "Existing IDs in @graph: #{inspect(Enum.map(matches, fn node -> Map.get(node, @id) end))}"
-            )
-
-            IO.puts(
-              "Included match IDs: #{inspect(Enum.map(included_matches, fn node -> Map.get(node, @id) end))}"
-            )
-          end
 
           # Add included nodes to result
           # Filter out nodes that are already embedded anywhere in the result to avoid duplication
@@ -630,11 +560,6 @@ defmodule JSON.LD.Framing do
             Enum.reject(included_matches, fn node ->
               MapSet.member?(existing_ids, Map.get(node, @id))
             end)
-
-          if System.get_env("DEBUG_INCLUDED") do
-            IO.puts("Unique included nodes: #{length(unique_included)}")
-            IO.puts("===============================\n")
-          end
 
           if unique_included != [] do
             Map.put(result, @included, unique_included)
@@ -690,15 +615,6 @@ defmodule JSON.LD.Framing do
           _ -> false
         end
 
-      if System.get_env("DEBUG_UNWRAP") do
-        IO.puts("\n=== UNWRAP DECISION ===")
-        IO.puts("frame_obj @id: #{inspect(frame_id)}")
-        IO.puts("is_id_wildcard: #{is_id_wildcard}")
-        IO.puts("frame_has_properties: #{frame_has_properties}")
-        IO.puts("frame_has_other_properties: #{frame_has_other_properties}")
-        IO.puts("result @graph length: #{length(result[@graph] || [])}")
-      end
-
       # Unwrap if:
       # 1. @id is wildcard AND frame has @id
       # 2. Frame has properties but NOT @id
@@ -746,99 +662,6 @@ defmodule JSON.LD.Framing do
       # Pass original frame (not expanded) to compaction so it can respect @embed directives
       # Pass node_map so compaction can compute reverse properties
 
-      if System.get_env("DEBUG_FRAMING") != nil do
-        IO.puts("\n=== FRAMED OUTPUT BEFORE COMPACTION ===")
-        IO.puts("Result is map: #{is_map(result)}")
-        IO.puts("Result keys: #{inspect(Map.keys(result || %{}))}")
-
-        nodes =
-          if is_map(result) and Map.has_key?(result, "@graph") do
-            IO.puts("Has @graph with #{length(result["@graph"] || [])} nodes")
-            result["@graph"]
-          else
-            IO.puts("No @graph, treating result as single node")
-            [result]
-          end
-
-        # Look for Board node and its propertiesIn
-        board = Enum.find(nodes || [], fn n -> is_map(n) and n["@id"] == "wellos:Board" end)
-
-        if board do
-          IO.puts("\n>>> Board node found!")
-          IO.puts("Board keys: #{inspect(Map.keys(board))}")
-
-          # Check @reverse
-          if board["@reverse"] do
-            IO.puts("\n>>> Board has @reverse!")
-            IO.puts("@reverse keys: #{inspect(Map.keys(board["@reverse"]))}")
-
-            if board["@reverse"]["http://ontology.wellos.io/propertiesIn"] do
-              IO.puts("Found propertiesIn in @reverse!")
-              props_in = board["@reverse"]["http://ontology.wellos.io/propertiesIn"]
-              IO.puts("propertiesIn count: #{length(List.wrap(props_in))}")
-            end
-          end
-
-          props_in = board["http://ontology.wellos.io/propertiesIn"]
-
-          if props_in do
-            IO.puts("Board has propertiesIn with #{length(List.wrap(props_in))} items")
-            first_prop = List.first(List.wrap(props_in))
-            IO.puts("First propertiesIn keys: #{inspect(Map.keys(first_prop || %{}))}")
-            IO.puts("First propertiesIn: #{inspect(first_prop, limit: 10)}")
-
-            # Check if it has domain
-            if is_map(first_prop) do
-              domain = first_prop["http://www.w3.org/2000/01/rdf-schema#domain"]
-
-              if domain do
-                first_domain = List.first(List.wrap(domain))
-                IO.puts("\nDomain in propertiesIn[0]:")
-                IO.puts("  Keys: #{inspect(Map.keys(first_domain || %{}))}")
-                IO.puts("  Value: #{inspect(first_domain, limit: 10)}")
-              end
-            end
-          else
-            IO.puts("Board has NO propertiesIn as direct property!")
-          end
-        else
-          IO.puts("\n>>> Board node NOT found!")
-
-          IO.puts(
-            "Available node IDs: #{inspect(Enum.map(nodes || [], fn n -> if is_map(n), do: n["@id"], else: nil end) |> Enum.take(10))}"
-          )
-        end
-
-        IO.puts("=======================================\n")
-      end
-
-      # Debug: Print the exact structure before compaction
-      if System.get_env("DEBUG_FRAMING") do
-        IO.puts("\n=== STRUCTURE BEFORE COMPACTION ===")
-        IO.inspect(result, pretty: true, limit: :infinity)
-      end
-
-      if System.get_env("DEBUG_HUGE") do
-        graph_nodes =
-          if is_map(result) and Map.has_key?(result, "@graph"), do: result["@graph"], else: []
-
-        ids = Enum.map(graph_nodes, fn node -> Map.get(node, "@id") end) |> Enum.reject(&is_nil/1)
-        unique_ids = Enum.uniq(ids)
-        IO.puts("\n=== BEFORE COMPACTION ===")
-        IO.puts("@graph nodes: #{length(graph_nodes)}")
-        IO.puts("@graph @ids: #{length(ids)}")
-        IO.puts("Unique @ids: #{length(unique_ids)}")
-
-        if length(ids) != length(unique_ids) do
-          IO.puts("WARNING: Duplicate @ids before compaction!")
-        end
-      end
-
-      if System.get_env("DEBUG_T0010") do
-        IO.puts("\n=== BEFORE COMPACTION ===")
-        IO.inspect(result, pretty: true, limit: :infinity)
-      end
-
       compacted =
         Compaction.compact(
           result,
@@ -853,67 +676,13 @@ defmodule JSON.LD.Framing do
           node_map
         )
 
-      if System.get_env("DEBUG_T0010") do
-        IO.puts("\n=== AFTER COMPACTION ===")
-        IO.inspect(compacted, pretty: true, limit: :infinity)
-      end
-
-      if System.get_env("DEBUG_HUGE") do
-        graph_nodes =
-          if is_map(compacted) and Map.has_key?(compacted, "@graph"),
-            do: compacted["@graph"],
-            else: []
-
-        ids = Enum.map(graph_nodes, fn node -> Map.get(node, "@id") end) |> Enum.reject(&is_nil/1)
-        unique_ids = Enum.uniq(ids)
-        IO.puts("\n=== AFTER COMPACTION ===")
-        IO.puts("@graph nodes: #{length(graph_nodes)}")
-        IO.puts("@graph @ids: #{length(ids)}")
-        IO.puts("Unique @ids: #{length(unique_ids)}")
-
-        if length(ids) != length(unique_ids) do
-          IO.puts("WARNING: Duplicate @ids after compaction!")
-          # Show which IDs are duplicated
-          id_counts = Enum.reduce(ids, %{}, fn id, acc -> Map.update(acc, id, 1, &(&1 + 1)) end)
-
-          duplicates =
-            Enum.filter(id_counts, fn {_id, count} -> count > 1 end)
-            |> Enum.sort_by(fn {_id, count} -> -count end)
-
-          IO.puts("\nTop 10 duplicated IDs:")
-
-          Enum.take(duplicates, 10)
-          |> Enum.each(fn {id, count} -> IO.puts("  #{id}: #{count} times") end)
-        end
-      end
-
       # Step 12: Add @context to result
       # Normative: https://www.w3.org/TR/json-ld11-framing/#framing-algorithm Step 12
-      final_result =
-        case frame do
-          %{@context => context} -> Map.put(compacted, @context, context)
-          _ -> compacted
-        end
 
-      if System.get_env("DEBUG_HUGE") do
-        graph_nodes =
-          if is_map(final_result) and Map.has_key?(final_result, "@graph"),
-            do: final_result["@graph"],
-            else: []
-
-        ids = Enum.map(graph_nodes, fn node -> Map.get(node, "@id") end) |> Enum.reject(&is_nil/1)
-        unique_ids = Enum.uniq(ids)
-        IO.puts("\n=== FINAL RESULT (with context) ===")
-        IO.puts("@graph nodes: #{length(graph_nodes)}")
-        IO.puts("@graph @ids: #{length(ids)}")
-        IO.puts("Unique @ids: #{length(unique_ids)}")
-
-        if length(ids) != length(unique_ids) do
-          IO.puts("WARNING: Duplicate @ids in final result!")
-        end
+      case frame do
+        %{@context => context} -> Map.put(compacted, @context, context)
+        _ -> compacted
       end
-
-      final_result
     after
       # Clean up node ID map to free memory
       NodeIdentifierMap.delete(node_id_map)
@@ -952,18 +721,6 @@ defmodule JSON.LD.Framing do
     # Check if we have multiple frame objects (multi-frame matching)
     frame_objects = Map.get(state, :frame_objects, [frame])
 
-    if System.get_env("DEBUG_FRAMING") do
-      IO.puts("\n=== MATCH_FRAME ===")
-      IO.puts("Number of frame_objects: #{length(frame_objects)}")
-      IO.puts("Number of subjects: #{length(subjects)}")
-
-      if length(frame_objects) > 1 do
-        Enum.with_index(frame_objects, fn frame_obj, idx ->
-          IO.puts("Frame #{idx}: #{inspect(Map.keys(frame_obj))}")
-        end)
-      end
-    end
-
     # For multi-frame support: match each subject against all frames, use first match
     if length(frame_objects) > 1 do
       match_frame_multi(state, subjects, frame_objects, parent)
@@ -991,20 +748,6 @@ defmodule JSON.LD.Framing do
         end
       end)
       |> then(fn {matches, final_state} -> {Enum.reverse(matches), final_state} end)
-
-    if parent == nil and System.get_env("DEBUG_HUGE") do
-      IO.puts("\n=== MATCH_FRAME_SINGLE (TOP-LEVEL) ===")
-      IO.puts("Total subjects: #{length(subjects)}")
-      IO.puts("Matched subjects: #{length(matched_subjects)}")
-      # Check for duplicates
-      unique_matched = Enum.uniq(matched_subjects)
-
-      if length(unique_matched) != length(matched_subjects) do
-        IO.puts("WARNING: Duplicate matched subjects!")
-        IO.puts("  Unique: #{length(unique_matched)}")
-        IO.puts("  Total: #{length(matched_subjects)}")
-      end
-    end
 
     # Embed each matched subject
     # For top-level matches (parent == nil), each gets independent embedding context
@@ -1040,21 +783,6 @@ defmodule JSON.LD.Framing do
         end)
 
       flattened = List.flatten(nodes)
-
-      if System.get_env("DEBUG_HUGE") do
-        IO.puts("\n=== MATCH_FRAME_SINGLE RESULT ===")
-        IO.puts("Nodes before flatten: #{length(nodes)}")
-        IO.puts("Nodes after flatten: #{length(flattened)}")
-        # Check for duplicate @ids in result
-        ids = Enum.map(flattened, fn node -> Map.get(node, "@id") end) |> Enum.reject(&is_nil/1)
-        unique_ids = Enum.uniq(ids)
-
-        if length(unique_ids) != length(ids) do
-          IO.puts("WARNING: Duplicate @ids in flattened result!")
-          IO.puts("  Unique @ids: #{length(unique_ids)}")
-          IO.puts("  Total @ids: #{length(ids)}")
-        end
-      end
 
       {flattened, final_state}
     else
@@ -1201,23 +929,13 @@ defmodule JSON.LD.Framing do
       |> List.first()
       |> Kernel.||(state.require_all)
 
-    # Handle @reverse matching separately
-    # @reverse in frame means "match nodes that are targets of these relationships"
-    reverse_match =
-      if Map.has_key?(frame, @reverse) do
-        match_reverse_property(node, frame[@reverse], state)
-      else
-        true
-      end
-
     # Step 3.3-3.4: Match regular frame properties (excluding @reverse, framing keywords, and @included)
-    regular_match =
-      frame
-      |> Enum.filter(fn {key, _} -> key not in [@reverse, @included | @framing_keywords] end)
-      |> match_properties(node, require_all)
-
-    # Both regular properties and @reverse must match
-    reverse_match and regular_match
+    # Note: @reverse properties are always considered a "match" for filtering purposes.
+    # The actual work of finding and embedding reversed relationships happens
+    # in add_reverse_to_output during the framing output phase.
+    frame
+    |> Enum.filter(fn {key, _} -> key not in [@reverse, @included | @framing_keywords] end)
+    |> match_properties(node, require_all)
   end
 
   # Match frame properties against node
@@ -1387,13 +1105,6 @@ defmodule JSON.LD.Framing do
   # Per JSON-LD Framing 1.1 spec: @reverse properties only determine what gets included
   # in the output, not whether a node matches the frame
   # @reverse frame value is a map like {"prop": pattern}
-  defp match_reverse_property(_node, _reverse_frame, _state) do
-    # @reverse properties are always considered a "match" for filtering purposes
-    # The actual work of finding and embedding reversed relationships happens
-    # in add_reverse_to_output during the framing output phase
-    true
-  end
-
   # Match a frame value against node values
   # Normative: Value pattern matching
   defp match_value(frame_value, node_values) when is_map(frame_value) do
@@ -1610,37 +1321,8 @@ defmodule JSON.LD.Framing do
       # Check if already embedded
       embedded_node = Map.get(state.embedded, id)
 
-      if System.get_env("DEBUG_FRAMING") != nil and
-           (String.contains?(to_string(id), "column_of") or
-              String.contains?(to_string(id), "BoardColumn") or
-              String.contains?(to_string(id), "Sub") or String.contains?(to_string(id), "leaf")) do
-        IO.puts("\n>>> EMBED_NODE called for #{id}")
-        IO.puts("    embed_value: #{embed_value}")
-        IO.puts("    is_top_level_match: #{is_top_level_match}")
-        IO.puts("    is_circular: #{is_circular}")
-        IO.puts("    already_embedded: #{not is_nil(embedded_node)}")
-        IO.puts("    parent: #{inspect(parent)}")
-        IO.puts("    id == parent: #{id == parent}")
-        IO.puts("    frame @embed: #{inspect(frame["@embed"])}")
-        IO.puts("    frame @explicit: #{inspect(frame["@explicit"])}")
-        IO.puts("    frame keys: #{inspect(Map.keys(frame) |> Enum.take(15))}")
-        IO.puts("    FULL FRAME: #{inspect(frame, limit: 10)}")
-
-        if Map.has_key?(frame, "http://www.w3.org/2000/01/rdf-schema#domain") do
-          IO.puts("    frame HAS domain key!")
-
-          IO.puts(
-            "    frame[domain]: #{inspect(frame["http://www.w3.org/2000/01/rdf-schema#domain"], limit: 5)}"
-          )
-        else
-          IO.puts("    frame does NOT have domain key")
-        end
-
-        IO.puts("    subject_stack: #{inspect(state.subject_stack)}")
-      end
-
       # Check if we should apply SCC-based depth limiting
-      {should_limit_by_scc, scc_id, safe_depth} =
+      {should_limit_by_scc, _scc_id, _safe_depth} =
         if not is_nil(state.current_context_id) and not is_top_level_match do
           node_scc = Map.get(state.node_to_scc, id)
           context_scc = Map.get(state.node_to_scc, state.current_context_id)
@@ -1660,81 +1342,40 @@ defmodule JSON.LD.Framing do
         # and we've exceeded the safe depth, return a reference to prevent O(n²) traversal
         # This optimization maintains correctness while dramatically improving performance
         should_limit_by_scc ->
-          if System.get_env("DEBUG_FRAMING") != nil and
-               (String.contains?(to_string(id), "SCC") or state.context_depth > 3) do
-            IO.puts("    -> Returning reference (same SCC #{scc_id}, depth #{state.context_depth} > safe #{safe_depth})")
-          end
-
           {%{@id => id}, state}
 
         # Reference to parent node - return just a reference
         # Normative: Nodes within reverse properties that reference the parent should be minimal references
         # This prevents circular embedding when parent is temporarily removed from subject_stack
         not is_nil(parent) and id == parent ->
-          if System.get_env("DEBUG_FRAMING") != nil and
-               (String.contains?(to_string(id), "column_of") or
-                  String.contains?(to_string(id), "BoardColumn") or
-                  String.contains?(to_string(id), "Sub") or
-                  String.contains?(to_string(id), "leaf")) do
-            IO.puts("    -> Returning reference (references parent #{parent})")
-          end
-
           {%{@id => id}, state}
 
         # Circular reference detected - BUT if already embedded and @embed: @always, return the full embedded node
         # When a node is already fully embedded, it's safe to return it even if circular
         # This allows @embed: @always to work correctly with nested properties
         is_circular and embedded_node != nil and is_map(embedded_node) and embed_value == :always ->
-          if System.get_env("DEBUG_FRAMING") != nil and
-               (String.contains?(to_string(id), "column_of") or
-                  String.contains?(to_string(id), "BoardColumn")) do
-            IO.puts("    -> Returning already-embedded node (circular but @always)")
-          end
-
           {embedded_node, state}
 
         # Circular reference detected - return just a reference
         # Normative: Circular references must be broken to avoid infinite embedding
         is_circular ->
-          if System.get_env("DEBUG_FRAMING") != nil and
-               (String.contains?(to_string(id), "column_of") or
-                  String.contains?(to_string(id), "BoardColumn")) do
-            IO.puts("    -> Returning reference (circular)")
-          end
-
           {%{@id => id}, state}
 
         # Node matches @included frame - return just a reference (not for top-level matches)
         # Normative: Nodes in @included should not be deeply embedded in properties
         not is_top_level_match and
             Map.get(state, :included_node_ids, MapSet.new()) |> MapSet.member?(id) ->
-          if System.get_env("DEBUG_FRAMING") != nil do
-            IO.puts("    -> Returning reference (matches @included frame)")
-          end
-
           {%{@id => id}, state}
 
         # Never embed - return node reference (only for referenced nodes, not top-level matches)
         # Normative: @embed: @never behavior
         embed_value == :never and not is_top_level_match ->
-          if System.get_env("DEBUG_FRAMING") != nil and
-               (String.contains?(to_string(id), "column_of") or
-                  String.contains?(to_string(id), "BoardColumn")) do
-            IO.puts("    -> Returning reference (@never)")
-          end
-
           {%{@id => id}, state}
 
         # Already embedded with @once - return reference (but NOT for top-level matches)
         # Normative: @embed: @once behavior (default)
         # Top-level matches should always be fully embedded regardless of prior embedding
         embedded_node != nil and embed_value == :once and not is_top_level_match ->
-          if System.get_env("DEBUG_FRAMING") != nil and
-               (String.contains?(to_string(id), "column_of") or
-                  String.contains?(to_string(id), "BoardColumn")) do
-            IO.puts("    -> Returning reference (already embedded with @once)")
-          end
-
           {%{@id => id}, state}
 
         # @last: only embed fully if this is the LAST property embedding this node
@@ -1745,14 +1386,6 @@ defmodule JSON.LD.Framing do
           last_property = Map.get(last_embed_map, id)
           current_property = Map.get(state, :current_property)
           is_last_embedding = last_property == current_property
-
-          if System.get_env("DEBUG_FRAMING") != nil do
-            IO.puts("    @last logic for #{id}:")
-            IO.puts("      last_property: #{inspect(last_property)}")
-            IO.puts("      current_property: #{inspect(current_property)}")
-            IO.puts("      is_last_embedding: #{is_last_embedding}")
-            IO.puts("      embedded_node: #{inspect(embedded_node != nil)}")
-          end
 
           if is_last_embedding or last_property == nil do
             # This IS the last property - embed fully (fall through to embedding below)
@@ -1775,9 +1408,6 @@ defmodule JSON.LD.Framing do
             {output, final_state}
           else
             # Not the last property - return reference only
-            if System.get_env("DEBUG_FRAMING") != nil do
-              IO.puts("    -> Returning reference (@last, not last property)")
-            end
 
             {%{@id => id}, state}
           end
@@ -1785,12 +1415,6 @@ defmodule JSON.LD.Framing do
         # Embed the node
         # Normative: @embed: @always or first embedding with @once or top-level match
         true ->
-          if System.get_env("DEBUG_FRAMING") != nil and
-               (String.contains?(to_string(id), "column_of") or
-                  String.contains?(to_string(id), "BoardColumn")) do
-            IO.puts("    -> Fully embedding node")
-          end
-
           # Add to subject stack for circular reference detection
           # and increment context depth for SCC cycle detection
           state = %{
@@ -1803,31 +1427,6 @@ defmodule JSON.LD.Framing do
 
           # Store the actual embedded node for potential reuse when embed_value is :always
           final_state = put_in(final_state.embedded[id], output)
-
-          if System.get_env("DEBUG_FRAMING") != nil and
-               (String.contains?(to_string(id), "column_of") or
-                  String.contains?(to_string(id), "BoardColumn") or
-                  String.contains?(to_string(id), "Sub") or
-                  String.contains?(to_string(id), "leaf")) do
-            IO.puts("    -> embed_node: create_output_node returned for #{id}")
-            IO.puts("       Keys: #{inspect(Map.keys(output))}")
-
-            if Map.has_key?(output, @reverse) do
-              IO.puts("       @reverse keys: #{inspect(Map.keys(output[@reverse]))}")
-
-              Enum.each(output[@reverse], fn {prop, vals} ->
-                if is_list(vals) && length(vals) > 0 do
-                  first = hd(vals)
-
-                  if is_map(first) do
-                    IO.puts(
-                      "         #{prop} first node: keys=#{inspect(Map.keys(first))}, size=#{map_size(first)}"
-                    )
-                  end
-                end
-              end)
-            end
-          end
 
           # Remove node from subject_stack and decrement depth after processing is complete
           # Normative: Nodes should only be in subject_stack while actively being processed
@@ -1845,14 +1444,6 @@ defmodule JSON.LD.Framing do
   # Create the output node by processing properties
   # Normative: Node object creation with property filtering
   defp create_output_node(state, node, frame, id) do
-    if System.get_env("DEBUG_T0010") do
-      if is_binary(id) and String.contains?(id, "asset") do
-        IO.puts("\n=== CREATE_OUTPUT_NODE for #{id} ===")
-        IO.puts("Node keys: #{inspect(Map.keys(node))}")
-        IO.puts("Frame keys: #{inspect(Map.keys(frame))}")
-      end
-    end
-
     # Get framing flags
     # Normative: @explicit flag processing
     explicit = get_frame_flag(frame, @explicit, state.explicit_inclusion)
@@ -1945,11 +1536,6 @@ defmodule JSON.LD.Framing do
     # Normative: @embed: @last means only the last property embedding a node should have full embedding
     last_embed_map = build_last_embed_map(properties, node, frame)
 
-    if System.get_env("DEBUG_FRAMING") != nil and map_size(last_embed_map) > 0 do
-      IO.puts("\n=== LAST_EMBED_MAP for node #{id} ===")
-      IO.inspect(last_embed_map)
-    end
-
     # Merge with existing last_embed_map to preserve parent's mappings
     existing_map = Map.get(state, :last_embed_map, %{})
     state = Map.put(state, :last_embed_map, Map.merge(existing_map, last_embed_map))
@@ -1965,13 +1551,11 @@ defmodule JSON.LD.Framing do
 
     # Compute reverse properties from context definitions
     # For properties defined with @reverse in context (like propertiesIn, propertiesOut)
-    if System.get_env("DEBUG_FRAMING") do
-      IO.puts("\n>>> ABOUT TO CALL add_reverse_properties_from_context for node: #{id}")
-    end
-
     # Add current node to embedded BEFORE processing reverse properties
-    # Normative: When reverse property nodes reference the current node, they should get just a reference
-    # This prevents full embedding with @type when the node is referenced back from within reverse properties
+    # Normative: When reverse property nodes reference the current node, they should get just a
+    # reference
+    # This prevents full embedding with @type when the node is referenced back from within reverse
+    # properties
     state_with_embedded = put_in(state_after_props.embedded[id], output)
 
     # Temporarily remove current node from subject_stack to avoid false circular references
@@ -1992,39 +1576,12 @@ defmodule JSON.LD.Framing do
 
     # Handle @reverse - add nodes that point to this node
     # Normative: @reverse framing adds reversed relationships to output
-    {output, final_state} =
-      if Map.has_key?(frame, @reverse) do
-        add_reverse_to_output(state_after_reverse_props, node, frame[@reverse], output, id)
-      else
-        {output, state_after_reverse_props}
-      end
 
-    # Debug: Check @reverse content right before create_output_node returns
-    if System.get_env("DEBUG_FRAMING") do
-      IO.puts("\n>>> create_output_node RETURNING for #{id}:")
-
-      if Map.has_key?(output, @reverse) do
-        IO.puts("    Has @reverse with keys: #{inspect(Map.keys(output[@reverse]))}")
-
-        Enum.each(output[@reverse], fn {prop, vals} ->
-          IO.puts("      #{prop} => #{length(vals)} nodes")
-
-          if is_list(vals) && length(vals) > 0 do
-            first = hd(vals)
-
-            if is_map(first) do
-              IO.puts(
-                "        First node keys: #{inspect(Map.keys(first))}, size: #{map_size(first)}"
-              )
-            end
-          end
-        end)
-      else
-        IO.puts("    No @reverse in output")
-      end
+    if Map.has_key?(frame, @reverse) do
+      add_reverse_to_output(state_after_reverse_props, node, frame[@reverse], output, id)
+    else
+      {output, state_after_reverse_props}
     end
-
-    {output, final_state}
   end
 
   # Build map of node_id => property_name for @embed: @last
@@ -2042,10 +1599,6 @@ defmodule JSON.LD.Framing do
         # No inherited value
         true -> nil
       end
-
-    if System.get_env("DEBUG_FRAMING") != nil and frame_embed_option != nil do
-      IO.puts("  Frame-level @embed: #{inspect(frame_embed_option)}")
-    end
 
     properties
     |> Enum.reduce(%{}, fn property, acc ->
@@ -2084,12 +1637,6 @@ defmodule JSON.LD.Framing do
               true -> :once
             end
 
-          if System.get_env("DEBUG_FRAMING") != nil do
-            IO.puts(
-              "  Property #{property}: embed_option=#{inspect(embed_option)}, property @embed=#{inspect(property_embed_value)}, inherited=#{inspect(frame_embed_option)}"
-            )
-          end
-
           if embed_option == :last do
             # Get node IDs that this property would embed
             property_values = node[property] |> List.wrap()
@@ -2099,9 +1646,6 @@ defmodule JSON.LD.Framing do
               if is_map(value) and Map.has_key?(value, @id) do
                 # This property embeds this node ID with @last
                 # Since we process properties in order, this overwrites earlier properties
-                if System.get_env("DEBUG_FRAMING") != nil do
-                  IO.puts("    Tracking @last for node #{value[@id]} via property #{property}")
-                end
 
                 Map.put(acc2, value[@id], property)
               else
@@ -2148,24 +1692,6 @@ defmodule JSON.LD.Framing do
               nil
             end
           end
-
-        if System.get_env("DEBUG_FRAMING") != nil and
-             property == "http://www.w3.org/2000/01/rdf-schema#domain" and
-             node["@id"] == "wellos:column_of" do
-          IO.puts("\n=== PROCESSING DOMAIN PROPERTY IN column_of ===")
-          IO.puts("Parent: #{parent_id}")
-          IO.puts("Node: #{node["@id"]}")
-          IO.puts("Property: #{property}")
-          IO.puts("Frame keys: #{inspect(Map.keys(frame))}")
-          IO.puts("Frame has property: #{Map.has_key?(frame, property)}")
-          IO.puts("Frame[property] raw: #{inspect(Map.get(frame, property), limit: 5)}")
-          IO.puts("Property frame keys: #{inspect(Map.keys(property_frame))}")
-          IO.puts("Property frame: #{inspect(property_frame, limit: 5)}")
-
-          IO.puts(
-            "Property frame is wildcard: #{is_map(property_frame) and map_size(property_frame) == 0}"
-          )
-        end
 
         values = Map.get(node, property, []) |> List.wrap()
 
@@ -2445,17 +1971,6 @@ defmodule JSON.LD.Framing do
     # Get frame context to check term definitions
     frame_context = state.frame_context
 
-    if System.get_env("DEBUG_FRAMING") do
-      IO.puts("\n=== CHECKING FOR REVERSE PROPERTIES ===")
-      IO.puts("Node ID: #{node_id}")
-      IO.puts("Frame keys: #{inspect(Map.keys(frame) |> Enum.take(10))}")
-      IO.puts("Context has term_defs: #{map_size(frame_context.term_defs)} terms")
-
-      if Map.has_key?(frame, "@reverse") do
-        IO.puts("Frame @reverse keys: #{inspect(Map.keys(frame["@reverse"]))}")
-      end
-    end
-
     # For each property in the frame, check if it's a reverse property in the context
     {result, final_state} =
       frame
@@ -2468,18 +1983,8 @@ defmodule JSON.LD.Framing do
             term_def && term_def.iri_mapping == property
           end)
 
-        if System.get_env("DEBUG_FRAMING") do
-          IO.puts("  Checking property: #{property}")
-          IO.puts("    Found term: #{inspect(term_and_def && elem(term_and_def, 0))}")
-
-          if term_and_def do
-            {_term, term_def} = term_and_def
-            IO.puts("    reverse_property: #{term_def.reverse_property}")
-          end
-        end
-
         case term_and_def do
-          {term, term_def} when term_def.reverse_property ->
+          {_term, term_def} when term_def.reverse_property ->
             # This is a reverse property - compute it from the node map
             # Find all nodes that have the forward property (iri_mapping) pointing to this node
             forward_iri = term_def.iri_mapping
@@ -2489,31 +1994,6 @@ defmodule JSON.LD.Framing do
             referencing_node_ids =
               current_graph
               |> Enum.filter(fn {ref_id, candidate_node} ->
-                # Debug: Show sample nodes and detailed info for column_of
-                if System.get_env("DEBUG_FRAMING") do
-                  cond do
-                    String.contains?(to_string(ref_id), "column") ->
-                      IO.puts("\n  >>> Checking node: #{ref_id}")
-                      range_val = Map.get(candidate_node, forward_iri)
-
-                      IO.puts(
-                        "      forward_iri (#{forward_iri}) exists: #{not is_nil(range_val)}"
-                      )
-
-                      if range_val do
-                        IO.puts("      Value: #{inspect(range_val, limit: 10)}")
-                        IO.puts("      Looking for node_id: #{node_id}")
-                      end
-
-                      IO.puts(
-                        "      All keys in candidate: #{inspect(Map.keys(candidate_node) |> Enum.take(5))}"
-                      )
-
-                    true ->
-                      :ok
-                  end
-                end
-
                 # Skip the current node itself
                 # Check if candidate_node has forward_iri pointing to our node
                 ref_id != node_id &&
@@ -2543,33 +2023,10 @@ defmodule JSON.LD.Framing do
                 _ -> %{}
               end
 
-            if System.get_env("DEBUG_FRAMING") do
-              IO.puts("\n=== REVERSE PROPERTY: #{term} ===")
-              IO.puts("Expanded IRI: #{property}")
-              IO.puts("Forward IRI: #{forward_iri}")
-              IO.puts("Current graph: #{acc_state.current_graph}")
-              IO.puts("Graph has #{map_size(current_graph)} nodes")
-              IO.puts("Looking for nodes with '#{forward_iri}' pointing to '#{node_id}'")
-              IO.puts("Found #{length(referencing_node_ids)} referencing nodes")
-              IO.puts("Property frame: #{inspect(property_frame, limit: 5)}")
-            end
-
             {referencing_nodes, new_state} =
               referencing_node_ids
               |> Enum.map_reduce(acc_state, fn ref_id, thread_state ->
                 result = embed_node(thread_state, ref_id, property_frame, node_id)
-
-                if System.get_env("DEBUG_FRAMING") do
-                  case result do
-                    {nil, _} ->
-                      IO.puts("  Node #{ref_id}: returned nil")
-
-                    {embedded, _} ->
-                      IO.puts(
-                        "  Node #{ref_id}: embedded with keys #{inspect(Map.keys(embedded))}"
-                      )
-                  end
-                end
 
                 case result do
                   {nil, updated_state} -> {[], updated_state}
@@ -2608,21 +2065,6 @@ defmodule JSON.LD.Framing do
       end)
 
     # Also process properties in @reverse (if present)
-    if System.get_env("DEBUG_FRAMING") do
-      IO.puts("\n>>> Checking frame[@reverse]")
-
-      if Map.has_key?(frame, "@reverse") do
-        IO.puts("    frame[@reverse] keys: #{inspect(Map.keys(frame["@reverse"]))}")
-        IO.puts("    Current result has @reverse: #{Map.has_key?(result, @reverse)}")
-
-        if Map.has_key?(result, @reverse) do
-          IO.puts("    Current @reverse properties: #{inspect(Map.keys(result[@reverse]))}")
-        end
-      else
-        IO.puts("    No frame[@reverse]")
-      end
-    end
-
     {final_result, final_final_state} =
       case Map.get(frame, "@reverse") do
         nil ->
@@ -2640,13 +2082,8 @@ defmodule JSON.LD.Framing do
                 term_def && term_def.reverse_property && term_def.iri_mapping == property
               end)
 
-            if System.get_env("DEBUG_FRAMING") do
-              IO.puts("  Checking @reverse property: #{property}")
-              IO.puts("    Found reverse term: #{inspect(term_and_def && elem(term_and_def, 0))}")
-            end
-
             case term_and_def do
-              {term, term_def} ->
+              {_term, term_def} ->
                 # This is a reverse property - compute it from the node map
                 forward_iri = term_def.iri_mapping
                 current_graph = Map.get(acc_state.graph_map, acc_state.current_graph, %{})
@@ -2655,31 +2092,6 @@ defmodule JSON.LD.Framing do
                 referencing_node_ids =
                   current_graph
                   |> Enum.filter(fn {ref_id, candidate_node} ->
-                    # Debug: Show sample nodes and detailed info for column_of
-                    if System.get_env("DEBUG_FRAMING") do
-                      cond do
-                        String.contains?(to_string(ref_id), "column") ->
-                          IO.puts("\n  >>> Checking node: #{ref_id}")
-                          range_val = Map.get(candidate_node, forward_iri)
-
-                          IO.puts(
-                            "      forward_iri (#{forward_iri}) exists: #{not is_nil(range_val)}"
-                          )
-
-                          if range_val do
-                            IO.puts("      Value: #{inspect(range_val, limit: 10)}")
-                            IO.puts("      Looking for node_id: #{node_id}")
-                          end
-
-                          IO.puts(
-                            "      All keys in candidate: #{inspect(Map.keys(candidate_node) |> Enum.take(5))}"
-                          )
-
-                        true ->
-                          :ok
-                      end
-                    end
-
                     # Skip the current node itself
                     # Check if candidate_node has forward_iri pointing to our node
                     ref_id != node_id &&
@@ -2709,74 +2121,11 @@ defmodule JSON.LD.Framing do
                     _ -> %{}
                   end
 
-                if System.get_env("DEBUG_FRAMING") do
-                  IO.puts("\n=== REVERSE PROPERTY (from @reverse): #{term} ===")
-                  IO.puts("Expanded IRI: #{property}")
-                  IO.puts("Forward IRI: #{forward_iri}")
-                  IO.puts("Current graph: #{acc_state.current_graph}")
-                  IO.puts("Graph has #{map_size(current_graph)} nodes")
-                  IO.puts("Looking for nodes with '#{forward_iri}' pointing to '#{node_id}'")
-                  IO.puts("Found #{length(referencing_node_ids)} referencing nodes")
-
-                  IO.puts(
-                    "Property frame keys: #{inspect(Map.keys(property_frame) |> Enum.take(10))}"
-                  )
-
-                  IO.puts("Property frame @embed: #{inspect(property_frame["@embed"])}")
-                  IO.puts("Property frame @explicit: #{inspect(property_frame["@explicit"])}")
-
-                  # Check domain frame specifically
-                  domain_frame = property_frame["http://www.w3.org/2000/01/rdf-schema#domain"]
-
-                  if domain_frame do
-                    IO.puts("Property frame has domain: #{inspect(domain_frame, limit: 5)}")
-                  end
-                end
-
                 {referencing_nodes, new_state} =
                   referencing_node_ids
                   |> Enum.map_reduce(acc_state, fn ref_id, thread_state ->
-                    if System.get_env("DEBUG_FRAMING") do
-                      node_in_graph = current_graph[ref_id]
-                      IO.puts("\n  >>> About to embed node #{ref_id}")
-                      IO.puts("      Node type in graph: #{inspect(node_in_graph["@type"])}")
-
-                      IO.puts(
-                        "      Node keys in graph: #{inspect(Map.keys(node_in_graph) |> Enum.take(10))}"
-                      )
-                    end
-
                     # Check if already embedded BEFORE calling embed_node
-                    if System.get_env("DEBUG_FRAMING") do
-                      already_emb = Map.get(thread_state.embedded, ref_id)
-
-                      IO.puts(
-                        "      Node #{ref_id} already in state.embedded: #{not is_nil(already_emb)}"
-                      )
-
-                      if already_emb do
-                        IO.puts("      Existing keys: #{inspect(Map.keys(already_emb))}")
-                      end
-                    end
-
                     result = embed_node(thread_state, ref_id, property_frame, node_id)
-
-                    if System.get_env("DEBUG_FRAMING") do
-                      case result do
-                        {nil, _} ->
-                          IO.puts("      Result: nil")
-
-                        {embedded, _} when is_map(embedded) ->
-                          IO.puts("      Result keys: #{inspect(Map.keys(embedded))}")
-
-                          if map_size(embedded) <= 2 do
-                            IO.puts("      MINIMAL EMBEDDING! Full result: #{inspect(embedded)}")
-                          end
-
-                        {embedded, _} ->
-                          IO.puts("      Result is NOT a map: #{inspect(embedded)}")
-                      end
-                    end
 
                     case result do
                       {nil, updated_state} ->
@@ -2803,51 +2152,11 @@ defmodule JSON.LD.Framing do
                     # Compaction will handle unwrapping based on container mappings
                     value = referencing_nodes
 
-                    if System.get_env("DEBUG_FRAMING") do
-                      IO.puts("\n>>> Adding reverse property to output:")
-                      IO.puts("    Property: #{property}")
-                      IO.puts("    Value type: list")
-                      IO.puts("    Value: #{inspect(value, pretty: true, limit: :infinity)}")
-
-                      if is_list(value) && length(value) > 0 do
-                        first = hd(value)
-
-                        if is_map(first) do
-                          IO.puts("    First node keys: #{inspect(Map.keys(first))}")
-                          IO.puts("    First node map_size: #{map_size(first)}")
-                        end
-                      end
-                    end
-
                     # Reverse properties must be placed under @reverse in expanded form
                     # Normative: Reverse properties belong under @reverse, not as top-level properties
                     reverse_obj = Map.get(acc_output, @reverse, %{})
                     updated_reverse_obj = Map.put(reverse_obj, property, value)
                     final_output = Map.put(acc_output, @reverse, updated_reverse_obj)
-
-                    if System.get_env("DEBUG_FRAMING") do
-                      IO.puts("\n>>> AFTER adding to @reverse:")
-
-                      if Map.has_key?(final_output, @reverse) do
-                        reverse_in_output = final_output[@reverse]
-
-                        if Map.has_key?(reverse_in_output, property) do
-                          val_in_output = reverse_in_output[property]
-
-                          if is_list(val_in_output) && length(val_in_output) > 0 do
-                            first = hd(val_in_output)
-
-                            if is_map(first) do
-                              IO.puts(
-                                "    First node in @reverse still has keys: #{inspect(Map.keys(first))}"
-                              )
-
-                              IO.puts("    First node map_size: #{map_size(first)}")
-                            end
-                          end
-                        end
-                      end
-                    end
 
                     final_output
                   end
@@ -2892,7 +2201,7 @@ defmodule JSON.LD.Framing do
 
       # Node reference - embed or reference
       # Normative: Recursive node embedding
-      Map.has_key?(value, @id) ->
+      is_map(value) and Map.has_key?(value, @id) ->
         referenced_id = value[@id]
 
         # Check if this references a named graph (not in default graph but exists as graph key)
@@ -3112,31 +2421,7 @@ defmodule JSON.LD.Framing do
                 %{}
             end
 
-          if System.get_env("DEBUG_FRAMING") != nil and referenced_id == "wellos:BoardColumn" do
-            IO.puts("\n>>> PROCESSING NODE REFERENCE: #{referenced_id}")
-            IO.puts("    frame is_map: #{is_map(frame)}")
-            IO.puts("    frame size: #{if is_map(frame), do: map_size(frame), else: "N/A"}")
-            IO.puts("    sub_frame keys: #{inspect(Map.keys(sub_frame) |> Enum.take(5))}")
-            IO.puts("    sub_frame @embed: #{inspect(sub_frame["@embed"])}")
-            IO.puts("    sub_frame @explicit: #{inspect(sub_frame["@explicit"])}")
-          end
-
-          if System.get_env("DEBUG_FRAMING") != nil and referenced_id == "wellos:BoardColumn" do
-            IO.puts("    already_embedded: #{not is_nil(Map.get(state.embedded, referenced_id))}")
-            IO.puts("    in subject_stack: #{referenced_id in state.subject_stack}")
-          end
-
-          {result, new_state} = embed_node(state, referenced_id, sub_frame, parent)
-
-          if System.get_env("DEBUG_FRAMING") != nil and referenced_id == "wellos:BoardColumn" do
-            IO.puts("    result keys: #{inspect(Map.keys(result || %{}))}")
-
-            if result && map_size(result) <= 2 do
-              IO.puts("    MINIMAL RESULT: #{inspect(result)}")
-            end
-          end
-
-          {result, new_state}
+          embed_node(state, referenced_id, sub_frame, parent)
         end
 
       # Other value - pass through
@@ -3217,12 +2502,6 @@ defmodule JSON.LD.Framing do
     # Start with nodes from @default graph
     default_nodes = node_map[@default] || %{}
 
-    if System.get_env("DEBUG_FRAMING") != nil do
-      IO.puts("\n=== MERGING GRAPHS FOR FRAMING ===")
-      IO.puts("Available graphs: #{inspect(Map.keys(node_map))}")
-      IO.puts("Default graph nodes: #{inspect(Map.keys(default_nodes))}")
-    end
-
     # Get all named graphs (exclude @default and unnamed blank node graphs)
     # Normative: Blank node graphs should not be merged with default graph
     # Only named graphs (with IRI identifiers) should be merged
@@ -3233,41 +2512,20 @@ defmodule JSON.LD.Framing do
       |> Enum.map(fn {_, graph_nodes} -> graph_nodes end)
 
     # Merge nodes from all named graphs (excluding blank node graphs)
-    result =
-      Enum.reduce(named_graphs, default_nodes, fn graph_nodes, acc ->
-        Enum.reduce(graph_nodes, acc, fn {node_id, node}, acc ->
-          if Map.has_key?(acc, node_id) do
-            # Node already exists - merge properties
-            if System.get_env("DEBUG_FRAMING") != nil do
-              IO.puts("Merging existing node: #{node_id}")
-            end
 
-            Map.update!(acc, node_id, fn existing_node ->
-              merge_node_properties(existing_node, node)
-            end)
-          else
-            # New node - add it
-            if System.get_env("DEBUG_FRAMING") != nil do
-              IO.puts("Adding new node: #{node_id}")
-            end
-
-            Map.put(acc, node_id, node)
-          end
-        end)
-      end)
-
-    if System.get_env("DEBUG_FRAMING") != nil do
-      IO.puts("Merged graph nodes: #{inspect(Map.keys(result))}")
-
-      for {id, node} <- result do
-        if not String.contains?(id, "#graph") do
-          IO.puts("\n  Merged node #{id}:")
-          IO.inspect(node, pretty: true, limit: :infinity)
+    Enum.reduce(named_graphs, default_nodes, fn graph_nodes, acc ->
+      Enum.reduce(graph_nodes, acc, fn {node_id, node}, acc ->
+        if Map.has_key?(acc, node_id) do
+          # Node already exists - merge properties
+          Map.update!(acc, node_id, fn existing_node ->
+            merge_node_properties(existing_node, node)
+          end)
+        else
+          # New node - add it
+          Map.put(acc, node_id, node)
         end
-      end
-    end
-
-    result
+      end)
+    end)
   end
 
   # Merge properties from two nodes with the same @id
@@ -3519,7 +2777,7 @@ defmodule JSON.LD.Framing do
   # Removes @id from blank nodes that are only referenced once
   # This makes the output cleaner by only including @id when necessary for references
   @spec prune_blank_node_identifiers(any, map() | nil) :: any
-  defp prune_blank_node_identifiers(value, context \\ nil) do
+  defp prune_blank_node_identifiers(value, context) do
     # Step 1: Scan the framed result and count blank node ID occurrences
     bnode_counts = count_blank_node_ids(value, %{})
 
@@ -3537,22 +2795,6 @@ defmodule JSON.LD.Framing do
       end)
       |> Enum.map(fn {id, _} -> id end)
       |> MapSet.new()
-
-    if System.get_env("DEBUG_BLANK_NODES") != nil do
-      IO.puts("\n=== BLANK NODE COUNTS ===")
-
-      Enum.each(bnode_counts, fn {id, count} ->
-        IO.puts("  #{id}: #{count} occurrences")
-      end)
-
-      IO.puts("Properties with @type: @id: #{inspect(MapSet.to_list(id_properties))}")
-
-      if MapSet.size(id_properties) > 0 do
-        IO.puts("Value structure: #{inspect(value, limit: 10, pretty: true)}")
-      end
-
-      IO.puts("Bnodes to clear: #{inspect(MapSet.to_list(bnodes_to_clear))}")
-    end
 
     # Step 4: Recursively remove @id from nodes with blank node IDs in bnodes_to_clear
     prune_ids(value, bnodes_to_clear)
@@ -3668,13 +2910,7 @@ defmodule JSON.LD.Framing do
   end
 
   defp blank_node_needed_by_id_property?(blank_node_id, value, id_properties) do
-    result = check_blank_node_in_value(blank_node_id, value, id_properties, nil)
-
-    if System.get_env("DEBUG_BLANK_NODES") != nil and MapSet.size(id_properties) > 0 do
-      IO.puts("  Checking if #{blank_node_id} needed: #{result}")
-    end
-
-    result
+    check_blank_node_in_value(blank_node_id, value, id_properties, nil)
   end
 
   # Recursively check if blank_node_id appears as @id of object that's value of an
