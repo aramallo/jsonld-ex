@@ -514,7 +514,10 @@ defmodule JSON.LD.Compaction do
                     [first | _] when is_map(first) -> {first, true}
                     val when is_map(val) -> {val, true}
                     # Use parent frame if no nested frame
-                    _ -> {frame, false}
+                    _ ->
+                      # If direct lookup fails, try to find a matching property by expanding frame keys
+                      # This handles cases where frame has "user:data" but item_active_property is "data"
+                      find_matching_frame_property(frame, item_active_property, expanded_property, active_context, options)
                   end
                 else
                   {frame, false}
@@ -1767,4 +1770,37 @@ defmodule JSON.LD.Compaction do
   end
 
   defp has_always_embed_in_frame?(_frame, _property), do: false
+
+  # Find a matching property in the frame by expanding frame property keys
+  # This handles cases where the frame has "user:data" but we're looking for "data"
+  defp find_matching_frame_property(frame, _item_active_property, expanded_property, _active_context, options) do
+    # Get the frame's @context to expand property keys
+    frame_context = frame["@context"]
+
+    if frame_context do
+      # Build a context from the frame's @context
+      ctx = Context.new(options) |> Context.update(frame_context, processor_options: options)
+
+      # Look for a frame property that expands to the same IRI as expanded_property
+      match =
+        Enum.find(frame, fn {key, _value} ->
+          # Skip @context and other keywords
+          if key not in ["@context", "@type", "@id", "@graph", "@default", "@embed", "@explicit", "@omitDefault", "@requireAll"] do
+            # Expand the frame property key
+            expanded_key = JSON.LD.IRIExpansion.expand_iri(key, ctx, options, false, true)
+            expanded_key == expanded_property
+          else
+            false
+          end
+        end)
+
+      case match do
+        {_key, [first | _]} when is_map(first) -> {first, true}
+        {_key, val} when is_map(val) -> {val, true}
+        _ -> {frame, false}
+      end
+    else
+      {frame, false}
+    end
+  end
 end

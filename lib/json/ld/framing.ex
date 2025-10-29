@@ -144,7 +144,7 @@ defmodule JSON.LD.Framing do
   @reverse "@reverse"
   # @set "@set"
   @value "@value"
-  @framing_keywords [@default, @embed, @explicit, @omitDefault, @requireAll]
+  @framing_keywords [@context, @default, @embed, @explicit, @omitDefault, @requireAll]
   # Keywords that should never be included as regular properties in output
   @excluded_from_properties [
     @id,
@@ -273,6 +273,11 @@ defmodule JSON.LD.Framing do
         %{@context => context} -> JSON.LD.context(context, processor_options)
         _ -> Context.new(processor_options)
       end
+
+    # Step 3.5: Extract property-scoped contexts from frame
+    # Scan the frame for properties that have @context in their values and add them as
+    # local contexts to the term definitions in frame_context
+    frame_context = extract_property_scoped_contexts(frame, frame_context, processor_options)
 
     # Step 4: Generate node map (with memory-efficient node ID management)
     # Normative: https://www.w3.org/TR/json-ld11-framing/#framing-algorithm Step 4
@@ -2634,23 +2639,47 @@ defmodule JSON.LD.Framing do
     else
       # Look for properties that might expand to this key
       # Check all properties in original frame
+      # We need to expand the original property keys to match against expanded_key
+      frame_context = original[@context]
+
       Enum.find_value(original, fn {orig_key, orig_value} ->
         # Skip framing keywords
         if orig_key in @framing_keywords do
           nil
         else
-          # For user properties, we'd need the context to expand them
-          # For now, simple heuristic: check if expanded_key ends with original key
-          # This handles cases like "http://example.com/embed" matching "embed"
-          if String.ends_with?(to_string(expanded_key), to_string(orig_key)) or
-               String.ends_with?(to_string(expanded_key), "/" <> to_string(orig_key)) or
-               String.ends_with?(to_string(expanded_key), "#" <> to_string(orig_key)) do
-            orig_value
+          # Try to expand the original key using the frame's context
+          if frame_context do
+            try do
+              ctx = JSON.LD.context(frame_context)
+              expanded_orig_key = JSON.LD.IRIExpansion.expand_iri(orig_key, ctx, %JSON.LD.Options{}, false, true)
+
+              if expanded_orig_key == expanded_key do
+                orig_value
+              else
+                # Fallback to heuristic matching
+                heuristic_match(expanded_key, orig_key, orig_value)
+              end
+            rescue
+              _ -> heuristic_match(expanded_key, orig_key, orig_value)
+            end
           else
-            nil
+            heuristic_match(expanded_key, orig_key, orig_value)
           end
         end
       end)
+    end
+  end
+
+  # Heuristic matching for properties when context-based matching fails
+  defp heuristic_match(expanded_key, orig_key, orig_value) do
+    # Check if expanded_key ends with original key
+    # This handles cases like "http://example.com/embed" matching "embed"
+    if String.ends_with?(to_string(expanded_key), to_string(orig_key)) or
+         String.ends_with?(to_string(expanded_key), "/" <> to_string(orig_key)) or
+         String.ends_with?(to_string(expanded_key), "#" <> to_string(orig_key)) do
+      orig_value
+    else
+      nil
     end
   end
 
@@ -2943,4 +2972,94 @@ defmodule JSON.LD.Framing do
 
   defp check_blank_node_in_value(_blank_node_id, _value, _id_properties, _parent_property),
     do: false
+
+  # Extract property-scoped contexts from frame and add them to frame_context
+  # This scans the frame for properties that have @context in their values and creates
+  # term definitions with local_context for those properties
+  defp extract_property_scoped_contexts(frame, frame_context, processor_options)
+       when is_map(frame) do
+    # Get the top-level @context to expand property names
+    frame_ctx = frame_context
+
+    # Scan frame properties for scoped contexts
+    frame
+    |> Enum.filter(fn {key, _val} -> key not in [@context | @framing_keywords] end)
+    |> Enum.reduce(frame_context, fn {property, property_frame}, acc_context ->
+      # Check if property_frame has an @context
+      if is_map(property_frame) and Map.has_key?(property_frame, @context) do
+        scoped_context = property_frame[@context]
+
+        # Expand the property name using the frame context to get the full IRI
+        expanded_property =
+          JSON.LD.IRIExpansion.expand_iri(property, frame_ctx, processor_options, false, true)
+
+        # Now we need to add/update the term definition for this property
+        # Find the compact term for this property in the context, or determine the best term to use
+        term = determine_term_for_property(acc_context, property, expanded_property)
+
+        # Update the context to add the local context to this term
+        update_term_with_local_context(acc_context, term, expanded_property, scoped_context)
+      else
+        acc_context
+      end
+    end)
+  end
+
+  defp extract_property_scoped_contexts(_frame, frame_context, _processor_options),
+    do: frame_context
+
+  # Determine the best term to use for a property
+  # If the property is a CURIE like "user:external_context", strip the prefix if it matches @vocab
+  # Otherwise, look for an existing term that maps to the expanded IRI
+  defp determine_term_for_property(context, property, expanded_iri) do
+    # Check if there's already a term definition for this IRI
+    existing_term =
+      context.term_defs
+      |> Enum.find(fn {_term, term_def} ->
+        term_def && term_def.iri_mapping == expanded_iri
+      end)
+      |> case do
+        {term, _term_def} -> term
+        nil -> nil
+      end
+
+    if existing_term do
+      existing_term
+    else
+      # If the property is a CURIE and the expanded IRI starts with the vocab, strip the prefix
+      # Example: "user:external_context" with @vocab "user:" expands to "user:external_context"
+      # We want to use "external_context" as the term
+      vocab = context.vocabulary_mapping
+
+      if vocab && is_binary(expanded_iri) && String.starts_with?(expanded_iri, vocab) do
+        # Strip the vocab prefix to get the unprefixed term
+        String.replace_prefix(expanded_iri, vocab, "")
+      else
+        # Otherwise use the property as-is
+        property
+      end
+    end
+  end
+
+  # Update or create a term definition with a local context
+  defp update_term_with_local_context(context, term, iri, local_context) do
+    # Get existing term definition or create a new one
+    existing_term_def = context.term_defs[term]
+
+    # Create or update the term definition
+    new_term_def =
+      if existing_term_def do
+        # Update existing term def with local context
+        %{existing_term_def | local_context: local_context}
+      else
+        # Create new term definition
+        %JSON.LD.Context.TermDefinition{
+          iri_mapping: iri,
+          local_context: local_context
+        }
+      end
+
+    # Update the context with the new term definition
+    %{context | term_defs: Map.put(context.term_defs, term, new_term_def)}
+  end
 end
