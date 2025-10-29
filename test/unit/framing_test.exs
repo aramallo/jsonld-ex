@@ -249,9 +249,9 @@ defmodule JSON.LD.FramingTest do
             "type" => "object"
           }
         ],
-        "modified_at" => [1_761_663_884_124],
-        "modified_by" => ["system"],
-        "name" => ["Step 1"]
+        "modified_at" => 1_761_663_884_124,
+        "modified_by" => "system",
+        "name" => "Step 1"
       }
 
       frame = %{
@@ -362,6 +362,191 @@ defmodule JSON.LD.FramingTest do
         "modified_at" => 1_761_663_884_124,
         "modified_by" => "system",
         "name" => "Step 1"
+      }
+
+      result = JSON.LD.frame(input, frame)
+      assert expected == result
+    end
+
+    test "user test 2" do
+      input = %{
+        "@context" => %{"@vocab" => "user:"},
+        "@graph" => [
+          %{
+            "@id" => "_:b3110415",
+            "https://json-schema.org/draft/2020-12/vocab/applicator#additionalProperties" => [
+              %{"@value" => false}
+            ],
+            "https://json-schema.org/draft/2020-12/vocab/applicator#properties" => [
+              %{"@id" => "_:b0"}
+            ],
+            "https://json-schema.org/draft/2020-12/vocab/meta-data#default" => [
+              %{"@value" => false}
+            ],
+            "https://json-schema.org/draft/2020-12/vocab/meta-data#description" => [
+              %{"@value" => "Indicates whether the equipment is affected."}
+            ],
+            "https://json-schema.org/draft/2020-12/vocab/meta-data#title" => [
+              %{"@value" => "Is Equipment Affected"}
+            ],
+            "https://json-schema.org/draft/2020-12/vocab/validation#required" => [
+              %{"@value" => "is_equipment_affected"}
+            ],
+            "https://json-schema.org/draft/2020-12/vocab/validation#type" => [
+              %{"@value" => "boolean"},
+              %{"@value" => "object"}
+            ],
+            "https://json-schema.org/meta#schema" => [
+              %{"@id" => "https://json-schema.org/draft/2020-12/schema"}
+            ]
+          },
+          %{
+            "@id" => "_:b3970062",
+            "user:index" => [%{"@value" => 1}],
+            "user:key" => [%{"@value" => "phase"}],
+            "user:value" => [%{"@value" => "SURF"}]
+          },
+          %{
+            "@id" => "_:b3970574",
+            "user:index" => [%{"@value" => 3}],
+            "user:key" => [%{"@value" => "activity"}],
+            "user:value" => [%{"@value" => "FOO"}]
+          },
+          %{
+            "@id" => "_:b3971086",
+            "user:index" => [%{"@value" => 4}],
+            "user:key" => [%{"@value" => "step"}],
+            "user:value" => [%{"@value" => "42"}]
+          },
+          %{
+            "@id" => "urn:user:id:TEST",
+            "@type" => ["user:ClassificationFacet"],
+            "user:account" => [%{"@id" => "urn:user:id:Test"}],
+            "user:classification_scheme" => [%{"@id" => "urn:user:id:CS1"}],
+            "user:created_at" => [%{"@value" => 1_761_663_884_124}],
+            "user:created_by" => [%{"@value" => "system"}],
+            "user:external_context" => [%{"@id" => "_:b3110415"}],
+            "user:modified_at" => [%{"@value" => 1_761_663_884_124}],
+            "user:modified_by" => [%{"@value" => "system"}],
+            "user:name" => [%{"@value" => "Step 1"}],
+            "user:property" => [
+              %{"@id" => "_:b3970062"},
+              %{"@id" => "_:b3970574"},
+              %{"@id" => "_:b3971086"}
+            ]
+          }
+        ],
+        "@id" => "urn:user:graph:default"
+      }
+
+      frame = %{
+        "@context" => %{"@vocab" => "user:"},
+        "@explicit" => false,
+        "@type" => "ClassificationFacet",
+        "user:account" => %{"@type" => %{"@default" => "Account"}},
+        "user:classification_scheme" => %{
+          "@type" => %{"@default" => "ClassificationScheme"}
+        },
+        "external_context" => %{
+          "@context" => %{
+            "$id" => "@id",
+            "$schema" => %{
+              "@id" => "https://json-schema.org/meta#schema",
+              "@type" => "@id"
+            },
+            "@version" => 1.1,
+            "@vocab" => "https://json-schema.org/draft/2020-12/vocab/core#",
+            "additionalProperties" => %{
+              "@id" =>
+                "https://json-schema.org/draft/2020-12/vocab/applicator#additionalProperties"
+            },
+            "default" => %{
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/meta-data#default"
+            },
+            "description" => %{
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/meta-data#description"
+            },
+            "properties" => %{
+              "@container" => "@index",
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/applicator#properties"
+            },
+            "required" => %{
+              "@container" => "@set",
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/validation#required"
+            },
+            "title" => %{
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/meta-data#title"
+            },
+            "type" => %{
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/validation#type"
+            }
+          },
+          "@explicit" => false
+        }
+      }
+
+      expected = %{
+        "@context" => %{"@vocab" => "user:"},
+        "@id" => "urn:user:id:TEST",
+        "@type" => "ClassificationFacet",
+        "account" => %{"@id" => "urn:user:id:Test", "@type" => "Account"},
+        "classification_scheme" => %{
+          "@id" => "urn:user:id:CS1",
+          "@type" => "ClassificationScheme"
+        },
+        "created_at" => 1_761_663_884_124,
+        "created_by" => "system",
+        "external_context" => %{
+          "$schema" => "https://json-schema.org/draft/2020-12/schema",
+          "@context" => %{
+            "$id" => "@id",
+            "$schema" => %{
+              "@id" => "https://json-schema.org/meta#schema",
+              "@type" => "@id"
+            },
+            "@version" => 1.1,
+            "@vocab" => "https://json-schema.org/draft/2020-12/vocab/core#",
+            "additionalProperties" => %{
+              "@id" =>
+                "https://json-schema.org/draft/2020-12/vocab/applicator#additionalProperties"
+            },
+            "default" => %{
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/meta-data#default"
+            },
+            "description" => %{
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/meta-data#description"
+            },
+            "properties" => %{
+              "@container" => "@index",
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/applicator#properties"
+            },
+            "required" => %{
+              "@container" => "@set",
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/validation#required"
+            },
+            "title" => %{
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/meta-data#title"
+            },
+            "type" => %{
+              "@id" => "https://json-schema.org/draft/2020-12/vocab/validation#type"
+            }
+          },
+          "additionalProperties" => false,
+          "default" => false,
+          "description" => "Indicates whether the equipment is affected.",
+          "properties" => %{"@none" => %{}},
+          "required" => ["is_equipment_affected"],
+          "title" => "Is Equipment Affected",
+          "type" => ["boolean", "object"]
+        },
+        "modified_at" => 1_761_663_884_124,
+        "modified_by" => "system",
+        "name" => "Step 1",
+        "property" => [
+          %{"index" => 1, "key" => "phase", "value" => "SURF"},
+          %{"index" => 3, "key" => "activity", "value" => "FOO"},
+          %{"index" => 4, "key" => "step", "value" => "42"}
+        ]
       }
 
       result = JSON.LD.frame(input, frame)
